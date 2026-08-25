@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/miniinfer-core",
+    "crates/miniinfer-cli",
+]
+resolver = "3"

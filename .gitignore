@@ -1,0 +1,13 @@
+/target/
+
+# Rust build artifacts inside crates if commands are run with crate manifests directly.
+crates/*/target/
+
+# Local editor and OS noise.
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local environment files.
+.env
+.env.*
