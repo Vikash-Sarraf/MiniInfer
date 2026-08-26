@@ -14,6 +14,10 @@ pub enum MiniInferError {
         index: usize,
         len: usize,
     },
+    MatMulShapeMismatch {
+        left: Vec<usize>,
+        right: Vec<usize>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;
