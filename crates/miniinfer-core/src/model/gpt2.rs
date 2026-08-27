@@ -1,4 +1,4 @@
-use crate::{error::{MiniInferError, Result}, model::config::ModelConfig, tensor::Tensor};
+use crate::{error::{MiniInferError, Result}, model::config::ModelConfig, tensor::Tensor, ops::{embedding, vector_add}};
 pub struct Gpt2Weights {
     pub wte: Tensor,
     pub wpe: Tensor,
@@ -64,6 +64,15 @@ impl Gpt2Weights {
             validate_shape(&block.mlp_c_proj_bias, &[config.hidden_size])?;
         }
         Ok(())
+    }
+
+    pub fn embed_tokens(&self, token_ids: &[usize]) -> Result<Tensor> {
+        let token_embeddings = embedding::embedding_lookup(&self.wte, token_ids)?;
+        let position_ids: Vec<usize> = (0..token_ids.len()).collect();
+        let position_embeddings = embedding::embedding_lookup(&self.wpe, &position_ids)?;
+
+        let hidden_data = vector_add::add(token_embeddings.data(), position_embeddings.data())?;
+        Tensor::new(token_embeddings.shape().to_vec(), hidden_data)
     }
 }
 
@@ -175,5 +184,37 @@ mod tests {
                 actual: vec![7, 4],
             }
         );
+    }
+
+    #[test]
+    fn embed_tokens() {
+        let weights = Gpt2Weights {
+            wte: Tensor::new(
+                vec![2, 2],
+                vec![
+                    1.0, 1.0,
+                    2.0, 2.0,
+                ],
+            )
+            .expect("valid token embedding"),
+            wpe: Tensor::new(
+                vec![2, 2],
+                vec![
+                    0.1, 0.2,
+                    0.3, 0.4,
+                ],
+            )
+            .expect("valid position embedding"),
+            blocks: vec![tiny_block_weights()],
+            ln_f_weight: tensor(&[2]),
+            ln_f_bias: tensor(&[2]),
+            lm_head_weight: tensor(&[2, 2]),
+        };
+        let token_ids = vec![1, 0];
+
+        let result = weights.embed_tokens(&token_ids).expect("embedding should succeed");
+
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.data(), &[2.1, 2.2, 1.3, 1.4]);
     }
 }
