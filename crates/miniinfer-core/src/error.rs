@@ -19,6 +19,11 @@ pub enum MiniInferError {
         right: Vec<usize>,
     },
     EmptyInput,
+    LengthMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidEpsilon,
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;

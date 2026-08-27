@@ -1419,6 +1419,23 @@ Browser UI can send prompt to local MiniInfer server and display streamed output
 
 ---
 
+### Future Consideration: Toy Fine-Tuning
+
+Training is not part of the main MiniInfer inference roadmap. Full training would require a much larger system: loss functions, backpropagation, gradients for every op, optimizers, batching, dataset loading, checkpoint writing, and memory planning.
+
+After inference, KV caching, benchmark reporting, optimized backend comparison, and quantization are working, MiniInfer may add a small educational fine-tuning experiment. This should stay deliberately scoped:
+
+- tiny synthetic transformer or tiny GPT-style fixture only
+- no full PyTorch/TensorFlow replacement goal
+- optional LoRA-style adapter fine-tuning rather than full model training
+- clear separation between inference runtime and training experiment
+- correctness comparison against a Python/PyTorch reference
+- benchmark/report memory and compute costs honestly
+
+The purpose would be learning and demonstration, not production training.
+
+---
+
 ## 25. Public README Requirements
 
 The README should include:
@@ -1583,6 +1600,8 @@ V3 is done when one or more of the following is implemented:
 5. GGUF import prototype.
 6. structured JSON constrained decoding.
 7. improved CPU matmul/multithreading beyond the V1.5 backend spike.
+
+Toy fine-tuning or LoRA adapter training may be considered after V3, but should remain an optional research/learning track rather than a core MiniInfer requirement.
 
 ---
 

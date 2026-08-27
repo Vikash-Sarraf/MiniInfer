@@ -8,7 +8,6 @@ pub struct Tensor {
 
 impl Tensor {
     pub fn new(shape: Vec<usize>, data: Vec<f32>) -> Result<Self> {
-        // Validate shape and data length
         if shape.is_empty() {
             return Err(MiniInferError::EmptyShape);
         }
