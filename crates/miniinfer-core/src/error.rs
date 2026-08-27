@@ -27,6 +27,10 @@ pub enum MiniInferError {
     InvalidConfig {
         message: String
     },
+    InvalidTensorShape {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;
