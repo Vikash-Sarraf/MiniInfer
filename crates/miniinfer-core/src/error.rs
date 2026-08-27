@@ -24,6 +24,9 @@ pub enum MiniInferError {
         actual: usize,
     },
     InvalidEpsilon,
+    InvalidConfig {
+        message: String
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;
