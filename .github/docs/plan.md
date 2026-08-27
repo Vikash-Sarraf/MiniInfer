@@ -2,9 +2,9 @@
 
 ## 1. Project Summary
 
-**MiniInfer** is a CPU-first LLM inference engine designed to be a credible resume project: small enough to finish, but real enough to demonstrate systems programming, ML infrastructure, numerical correctness, and measurable performance.
+**MiniInfer** is a CPU-first LLM inference runtime designed to be a credible resume project: small enough to finish, but real enough to demonstrate systems programming, ML infrastructure, numerical correctness, caching, model compression, and measurable performance.
 
-The project’s core goal is to build a real inference engine — not a fake runtime, hardcoded demo, or wrapper around an existing engine. It should load real model weights, tokenize real prompts, execute transformer decoding, maintain a KV cache, sample tokens, and stream generated output.
+The project’s core goal is to build a real inference runtime — not a fake runtime, hardcoded demo, or thin wrapper around an existing model runner. MiniInfer should own the model loading path, tokenizer integration, generation loop, KV cache, sampling, metrics, benchmark harness, and model-format decisions. Math libraries may be used later behind an explicit backend boundary, but they should not replace understanding of the inference pipeline.
 
 The V1 resume target is a complete, verified GPT-2-style inference path:
 
@@ -17,6 +17,8 @@ The V1 resume target is a complete, verified GPT-2-style inference path:
 - stream generated text from a CLI
 - compare correctness against Python/PyTorch references
 - publish reproducible benchmark results
+- keep simple reference kernels for learning and correctness checks
+- leave a clear path to optimized/library-backed kernels
 
 The project will preserve future expansion paths for:
 
@@ -60,7 +62,8 @@ The primary goal is a finished V1 that can be shown on a resume, explained in in
    - top-p
 8. Stream generated text from a CLI.
 9. Include correctness tests against Python/PyTorch or NumPy reference implementations.
-10. Include benchmarks:
+10. Keep tensor operations behind an ops/backend boundary so naive reference kernels can be compared with optimized implementations later.
+11. Include benchmarks:
     - model load time
     - prompt prefill speed
     - decode speed
@@ -69,9 +72,20 @@ The primary goal is a finished V1 that can be shown on a resume, explained in in
     - KV cache memory
     - no-cache vs KV-cache generation speed
 
-### 2.2 Secondary Goals
+### 2.2 Performance and Compression Goals
 
-Secondary goals are explicitly post-V1. They should not delay the core engine, correctness tests, tokenizer, KV cache, CLI generation, or benchmark report.
+These goals make the project more than a simple input/output demo. They can begin after the FP32 GPT-2 path is correct and benchmarked.
+
+1. Add an optimized CPU backend for selected hot operations, especially matmul.
+2. Compare naive reference kernels against optimized/library-backed kernels.
+3. Add int8 weight-only quantization as the first model-compression feature.
+4. Report memory reduction, speed changes, and numerical/logit drift for quantized models.
+5. Add prompt/prefix caching after normal KV-cache generation works.
+6. Track time to first token, decode tokens/sec, prefill tokens/sec, and cache memory.
+
+### 2.3 Secondary Goals
+
+Secondary goals are explicitly post-V1/V1.5. They should not delay the core engine, correctness tests, tokenizer, KV cache, CLI generation, benchmark report, or the first compression/performance story.
 
 1. Add a local HTTP server.
 2. Add an OpenAI-compatible API surface.
@@ -115,7 +129,7 @@ V1 will not include:
 - production-grade multi-user serving
 - broad model-family compatibility
 
-These may become future work, but they should not block the first complete engine. For resume value, a smaller finished inference engine with tests and benchmarks is more valuable than a broad unfinished platform.
+These may become future work, but they should not block the first complete engine. For resume value, a finished inference runtime with correctness evidence, caching, performance measurements, and a clear compression path is more valuable than a broad unfinished platform.
 
 ---
 
@@ -134,12 +148,15 @@ This means:
 - build a real engine, not a fake demo
 - use test fixtures for development, but final runtime must use real model weights
 - prioritize clear correctness evidence and benchmark artifacts over broad feature count
+- keep a small reference backend for understanding, testing, and baseline benchmarks
+- use optimized libraries only behind explicit backend boundaries, not as a hidden replacement for the runtime design
+- make caching, quantization, and benchmark comparisons first-class resume signals
 
 ### 4.1 Learning-First AI Assistance
 
-This project should rely on agentic coding as little as possible for the low-level inference internals. The project owner should handwrite and understand the core tensor, operation, tokenizer, model, KV-cache, and sampling code.
+This project should rely on agentic coding as little as possible for the low-level inference internals. The project owner should handwrite and understand the core tensor, operation, tokenizer, model, KV-cache, and sampling code that forms the reference implementation.
 
-Copilot may be used for explanation, design review, scaffolding, test planning, debugging, documentation, and small non-core wiring. Core implementations should follow the workspace guardrails in [../instructions/miniinfer-learning-first.instructions.md](../instructions/miniinfer-learning-first.instructions.md).
+Copilot may be used for explanation, design review, scaffolding, test planning, debugging, documentation, and small non-core wiring. Library-backed optimized kernels are allowed later when the project owner understands the concept and the backend boundary is explicit. Core implementations should follow the workspace guardrails in [../instructions/miniinfer-learning-first.instructions.md](../instructions/miniinfer-learning-first.instructions.md).
 
 ---
 
@@ -154,7 +171,11 @@ Runtime Engine
         ↓
 Model Architecture Implementation
         ↓
-Tensor Operations
+Ops Backend Boundary
+   ┌────────────────────┬──────────────────────────┐
+   │ Reference CPU Ops  │ Optimized CPU Ops        │
+   │ simple/readable    │ library-backed/future    │
+   └────────────────────┴──────────────────────────┘
         ↓
 Model Weights + Tokenizer + KV Cache
 ```
@@ -176,6 +197,22 @@ Tracing / Metrics / Prompt Cache / Tool Runtime
 ```
 
 The actual inference engine remains the main project. The agent and web layers are built on top of it.
+
+### 5.1 Backend and Performance Strategy
+
+MiniInfer should own the runtime architecture even if selected math kernels later call optimized libraries.
+
+V1 starts with simple reference kernels because they are useful for learning, debugging, and correctness baselines. These kernels do not need to become production-grade. Once the FP32 path works, hot operations should be isolated behind an ops/backend interface so they can be replaced or compared against optimized implementations.
+
+The resume story should emphasize measured systems work:
+
+- naive reference backend vs optimized backend
+- no-cache vs KV-cache decode throughput
+- FP32 weights vs int8 weight-only quantized weights
+- cold prompt prefill vs reused prompt/prefix cache
+- memory usage, KV-cache memory, TTFT, prefill tok/s, and decode tok/s
+
+The goal is not to claim that handwritten kernels outperform mature libraries. The goal is to show that MiniInfer understands the full inference pipeline and can measure the effect of practical runtime optimizations.
 
 ---
 
@@ -1071,7 +1108,7 @@ tensor shape, indexing, and error tests pass
 
 ---
 
-### Milestone 2: Reference-Tested Ops
+### Milestone 2: Reference Ops Baseline
 
 Deliverables:
 
@@ -1080,12 +1117,14 @@ Deliverables:
 - LayerNorm
 - GELU
 - embedding lookup
+- simple residual/vector add
 - tests against Python/NumPy reference
+- clear note that these are reference kernels, not final optimized kernels
 
 Completion criteria:
 
 ```text
-all operation-level tests pass
+all reference operation-level tests pass
 ```
 
 ---
@@ -1250,7 +1289,60 @@ produces a report.
 
 ---
 
-### Milestone 12: Resume-Ready Documentation
+### Milestone 12: Performance Backend Spike (V1.5)
+
+Deliverables:
+
+- backend trait or equivalent ops abstraction
+- naive/reference CPU backend retained for tests
+- one optimized/library-backed path for a hot operation, preferably matmul
+- naive vs optimized benchmark comparison
+- documentation of tradeoffs and when the optimized backend is used
+
+Completion criteria:
+
+```text
+Benchmark report compares reference and optimized execution for at least one hot operation or decode path.
+```
+
+---
+
+### Milestone 13: Int8 Weight Compression (V1.5)
+
+Deliverables:
+
+- int8 weight-only quantization format extension
+- quantization metadata such as scale values
+- converter support for writing quantized weights
+- memory reduction benchmark
+- numerical/logit drift comparison against FP32
+
+Completion criteria:
+
+```text
+Quantized model artifacts are smaller than FP32 and have measured accuracy/performance tradeoffs.
+```
+
+---
+
+### Milestone 14: Prompt/Prefix Cache (V1.5)
+
+Deliverables:
+
+- prefix cache key/hash design
+- reusable prefill/KV-cache entry abstraction
+- cache hit/miss metrics
+- repeated-prefix benchmark
+
+Completion criteria:
+
+```text
+Repeated prompts with shared prefixes show measured TTFT or prefill savings.
+```
+
+---
+
+### Milestone 15: Resume-Ready Documentation
 
 Deliverables:
 
@@ -1258,6 +1350,8 @@ Deliverables:
 - architecture overview
 - correctness methodology
 - benchmark results
+- caching and compression results when available
+- backend strategy and optimized-kernel comparison when available
 - limitations and roadmap
 - resume bullet examples
 
@@ -1269,7 +1363,7 @@ README accurately explains what works, how to reproduce it, and what is future w
 
 ---
 
-### Milestone 13: Server (Post-V1)
+### Milestone 16: Server (Post-V1)
 
 Deliverables:
 
@@ -1289,7 +1383,7 @@ and a curl request streams tokens.
 
 ---
 
-### Milestone 14: Agent Runtime (Post-V1)
+### Milestone 17: Agent Runtime (Post-V1)
 
 Deliverables:
 
@@ -1307,7 +1401,7 @@ A tool-call trace can be produced, validated, executed, and viewed.
 
 ---
 
-### Milestone 15: Web UI (Post-V1)
+### Milestone 18: Web UI (Post-V1)
 
 Deliverables:
 
@@ -1341,11 +1435,13 @@ The README should include:
 10. Limitations
 11. Roadmap
 12. Resume-positioned project summary
+13. Backend strategy: reference kernels, optimized backend path, and tradeoffs
+14. Caching and compression results when implemented
 
 The README should be honest:
 
 ```text
-MiniInfer is not intended to beat llama.cpp. It is a learning-focused but real inference engine that demonstrates model loading, tokenization, transformer decoding, KV caching, sampling, correctness testing, and benchmarking.
+MiniInfer is not intended to beat llama.cpp. It is a learning-focused but real inference runtime that demonstrates model loading, tokenization, transformer decoding, KV caching, sampling, correctness testing, benchmarking, and a practical path toward optimized kernels and model compression.
 ```
 
 ---
@@ -1364,10 +1460,18 @@ Benchmark-oriented bullet:
 
 > Improved autoregressive decode throughput by Xx using KV caching and published reproducible benchmarks for load time, TTFT, decode tokens/sec, and memory usage.
 
+Compression-oriented bullet:
+
+> Added int8 weight-only quantization to reduce model artifact size by Xx and measured the speed, memory, and numerical drift tradeoffs against FP32 inference.
+
+Backend-oriented bullet:
+
+> Designed a pluggable CPU ops backend with reference kernels for correctness and an optimized matmul path benchmarked against the baseline implementation.
+
 Interview explanation:
 
 ```text
-MiniInfer is a deliberately small but real inference engine. I focused V1 on one complete, verifiable path: converting GPT-2 weights, loading them into a custom format, running FP32 CPU transformer inference, streaming generated text, validating outputs against PyTorch, and measuring the effect of KV caching.
+MiniInfer is a deliberately small but real inference runtime. I focused V1 on one complete, verifiable path: converting GPT-2 weights, loading them into a custom format, running FP32 CPU transformer inference, streaming generated text, validating outputs against PyTorch, and measuring the effect of KV caching. The next performance track isolates math kernels behind a backend boundary so optimized libraries and int8 compression can be benchmarked without turning the project into a thin wrapper.
 ```
 
 ---
@@ -1408,6 +1512,15 @@ Mitigation:
 - keep agent/web layers secondary until engine correctness and benchmarks are published
 - measure progress by resume-visible artifacts, not feature count
 
+### 27.6 Risk: Becoming Only a Library Wrapper
+
+Mitigation:
+
+- MiniInfer owns model conversion, model format, loading, tokenizer integration, generation, sampling, KV cache, metrics, and benchmarks
+- optimized libraries are used only behind an explicit backend boundary
+- keep reference kernels as correctness baselines and learning artifacts
+- document what MiniInfer owns versus what any external backend provides
+
 ### 27.5 Risk: Local Model Restrictions
 
 Mitigation:
@@ -1436,6 +1549,14 @@ V1 is the resume-ready engine. It is done when:
 11. README documents usage, limitations, correctness methodology, benchmark results, and roadmap.
 12. The project can be summarized honestly in one strong resume bullet.
 
+V1.5 extends the resume story when:
+
+1. At least one hot operation can use an optimized/library-backed backend.
+2. Benchmarks compare the reference backend to the optimized path.
+3. Int8 weight-only quantization reduces model artifact size or memory use.
+4. Quantization includes measured numerical/logit drift against FP32.
+5. Prompt/prefix caching reports hit rate and prefill or TTFT savings.
+
 ---
 
 ## 29. Definition of Done for V2
@@ -1447,8 +1568,7 @@ V2 is done when:
 3. Server exposes a basic OpenAI-compatible endpoint.
 4. Runtime records request metrics.
 5. Agent runtime supports schema-validated tool calls.
-6. Prompt cache abstraction exists.
-7. A basic web dashboard shows chat, traces, and metrics.
+6. A basic web dashboard shows chat, traces, and metrics.
 
 ---
 
@@ -1458,12 +1578,11 @@ V3 is done when one or more of the following is implemented:
 
 1. Llama-style architecture support.
 2. RMSNorm, RoPE, and SwiGLU.
-3. int8 weight-only quantization.
-4. memory-mapped model loading.
-5. WebAssembly browser demo.
-6. GGUF import prototype.
-7. structured JSON constrained decoding.
-8. improved CPU matmul/multithreading.
+3. memory-mapped model loading.
+4. WebAssembly browser demo.
+5. GGUF import prototype.
+6. structured JSON constrained decoding.
+7. improved CPU matmul/multithreading beyond the V1.5 backend spike.
 
 ---
 

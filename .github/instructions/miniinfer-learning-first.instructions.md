@@ -14,6 +14,7 @@ MiniInfer is a resume project and a learning project. The project owner should g
 - Prefer explanations, diagrams, invariants, test cases, and small review comments over completed core implementations.
 - Ask the project owner to describe their intended algorithm before changing core inference code.
 - When reviewing code, explain the low-level reason for each issue: shape math, memory layout, numerical stability, transformer data flow, tokenizer behavior, or cache semantics.
+- When discussing optimized libraries, require an explicit backend boundary and a clear explanation of what MiniInfer still owns.
 
 ## Restricted Core Areas
 
@@ -38,6 +39,8 @@ Do not bulk-generate finished implementations for these areas unless the project
 - Debug compiler errors and failing tests with minimal, localized suggestions.
 - Provide pseudocode, formulas, shape annotations, and small illustrative snippets.
 - Edit non-core wiring and documentation when it does not hide inference logic from the project owner.
+- Help integrate optimized/library-backed ops after the project owner understands the concept and the reference behavior is tested.
+- Help design benchmarking, caching, quantization, and backend abstractions.
 
 ## Core Implementation Workflow
 
@@ -57,4 +60,6 @@ If the project owner explicitly asks for implementation using the phrase "Copilo
 
 - Optimize for a finished, explainable V1 over broad scope.
 - Protect the core proof: real weights, real tokenizer, transformer decode, KV cache, correctness tests, and benchmarks.
-- Keep server, agent runtime, web UI, quantization, and modern architectures post-V1 unless the plan is deliberately changed.
+- Treat naive kernels as reference baselines, not the whole project.
+- Prefer resume-visible systems work after correctness: optimized backend comparison, KV-cache speedup, int8 compression, prefix caching, and benchmark reporting.
+- Keep server, agent runtime, web UI, and modern architectures post-V1/V1.5 unless the plan is deliberately changed.
