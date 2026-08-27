@@ -1,24 +1,7 @@
-use crate::{error::{MiniInferError, Result}, tensor::Tensor};
+use crate::{error::Result, ops::helper, tensor::Tensor};
 
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    let left = a.shape();
-    let right = b.shape();
-
-    if left.len() != 2 {
-        return Err(MiniInferError::WrongRank { expected: 2, actual: left.len() });
-    }
-
-    if right.len() != 2 {
-        return Err(MiniInferError::WrongRank { expected: 2, actual: right.len() });
-    }
-
-    let m = left[0];
-    let k = left[1];
-    let n = right[1];
-
-    if k != right[0] {
-        return Err(MiniInferError::MatMulShapeMismatch { left: left.to_vec(), right: right.to_vec() });
-    }
+    let (m, k, n) = helper::validate_matmul_shape(a, b)?;
 
     let mut output = Vec::with_capacity(m * n);
 
@@ -41,6 +24,8 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::MiniInferError;
+
     #[test]
     fn multiplies_2x3_by_3x2() {
         let a = Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
