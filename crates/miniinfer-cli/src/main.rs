@@ -118,8 +118,15 @@ fn inspect_model(mut args: impl Iterator<Item = String>) -> miniinfer_core::erro
 
     let config_path = Path::new(&model_path).join("config.json");
     let config = miniinfer_core::model::loader::load_config(config_path)?;
-    print_config(&config);
 
+    let weights_path = Path::new(&model_path).join("weights.json");
+    if config.architecture == miniinfer_core::model::config::Architecture::Gpt2 {
+        let weights = miniinfer_core::model::loader::load_gpt2_weights(weights_path)?;
+        weights.validate_shapes(&config)?;
+
+        print_config(&config);
+        print_gpt2_weights(&weights);
+    }
     Ok(())
 }
 
@@ -139,4 +146,14 @@ fn print_config(config: &miniinfer_core::model::config::ModelConfig) {
     for (label, value) in rows {
         println!("{label}: {value}");
     }
+}
+
+fn print_gpt2_weights(weights: &miniinfer_core::model::gpt2::Gpt2Weights) {
+    println!("GPT-2 Weights:");
+    println!("  Token embedding: {:?}", weights.wte.shape());
+    println!("  Position embedding: {:?}", weights.wpe.shape());
+    println!("  Blocks: {}", weights.blocks.len());
+    println!("  Final layer norm weight: {:?}", weights.ln_f_weight.shape());
+    println!("  Final layer norm bias: {:?}", weights.ln_f_bias.shape());
+    println!("  LM head weight: {:?}", weights.lm_head_weight.shape());
 }
