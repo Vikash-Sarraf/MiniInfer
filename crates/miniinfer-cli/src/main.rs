@@ -1,13 +1,15 @@
+use std::path::Path;
+
 use miniinfer_core::{
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     tensor::Tensor,
 };
-fn main() {
+fn main() -> miniinfer_core::error::Result<()> {
     let mut args = std::env::args().skip(1);
 
     match args.next().as_deref() {
         Some("run") => println!("miniinfer run: not implemented yet"),
-        Some("inspect") => println!("miniinfer inspect: not implemented yet"),
+        Some("inspect") => inspect_model(args)?,
         Some("bench") => println!("miniinfer bench: not implemented yet"),
         Some("bench-matmul") => bench_matmul(),
         Some("--help") | Some("-h") | None => print_help(),
@@ -17,6 +19,7 @@ fn main() {
             std::process::exit(2);
         }
     }
+    Ok(())
 }
 
 fn print_help() {
@@ -86,4 +89,54 @@ fn tensors_close(a: &Tensor, b: &Tensor, tolerance: f32) -> bool {
         .iter()
         .zip(b.data().iter())
         .all(|(left, right)| (*left - *right).abs() <= tolerance)
+}
+
+fn inspect_model(mut args: impl Iterator<Item = String>) -> miniinfer_core::error::Result<()> {
+    let flag = match args.next() {
+        Some(flag) => flag,
+        None => {
+            eprintln!("Usage: miniinfer inspect --model <path>");
+            std::process::exit(1);
+        }
+    };
+
+    if flag != "--model" {
+        eprintln!("Unknown inspect option: {flag}");
+        eprintln!("Usage: miniinfer inspect --model <path>");
+        std::process::exit(2);
+    }
+
+    let model_path = match args.next() {
+        Some(path) => path,
+        None => {
+            eprintln!("Error: --model requires a path argument");
+            std::process::exit(1);
+        }
+    };
+
+    println!("Inspecting model at path: {model_path}");
+
+    let config_path = Path::new(&model_path).join("config.json");
+    let config = miniinfer_core::model::loader::load_config(config_path)?;
+    print_config(&config);
+
+    Ok(())
+}
+
+fn print_config(config: &miniinfer_core::model::config::ModelConfig) {
+    let rows = [
+        ("Architecture", format!("{:?}", config.architecture)),
+        ("Vocab size", config.vocab_size.to_string()),
+        ("Hidden size", config.hidden_size.to_string()),
+        ("Layers", config.num_layers.to_string()),
+        ("Heads", config.num_heads.to_string()),
+        ("Head dim", config.head_dim().to_string()),
+        ("Intermediate size", config.intermediate_size.to_string()),
+        ("Max positions", config.max_position_embeddings.to_string()),
+        ("LayerNorm epsilon", config.layer_norm_epsilon.to_string()),
+    ];
+
+    for (label, value) in rows {
+        println!("{label}: {value}");
+    }
 }

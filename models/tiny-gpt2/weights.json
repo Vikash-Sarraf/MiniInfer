@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "architecture": "gpt2",
+  "dtype": "f32",
+  "vocab_size": 8,
+  "max_position_embeddings": 8,
+  "hidden_size": 4,
+  "num_layers": 1,
+  "num_heads": 2,
+  "intermediate_size": 16,
+  "layer_norm_epsilon": 0.00001
+}
