@@ -1,14 +1,20 @@
 use std::path::Path;
 
 use miniinfer_core::{
+    error::{MiniInferError, Result},
+    model::{
+        config::{Architecture, ModelConfig},
+        gpt2::Gpt2Weights,
+        loader::{load_config, load_gpt2_weights},
+    },
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     tensor::Tensor,
 };
-fn main() -> miniinfer_core::error::Result<()> {
+fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
 
     match args.next().as_deref() {
-        Some("run") => println!("miniinfer run: not implemented yet"),
+        Some("run") => run_model(args)?,
         Some("inspect") => inspect_model(args)?,
         Some("bench") => println!("miniinfer bench: not implemented yet"),
         Some("bench-matmul") => bench_matmul(),
@@ -27,7 +33,7 @@ fn print_help() {
         "Usage: miniinfer <command> [options]
 Commands:
     run       Run inference on a model (not implemented yet)
-    inspect   Inspect a model (not implemented yet)
+    inspect   Inspect a model 
     bench     Benchmark a model (not implemented yet)
     bench-matmul Benchmark reference vs ndarray matmul
 Options:
@@ -91,7 +97,7 @@ fn tensors_close(a: &Tensor, b: &Tensor, tolerance: f32) -> bool {
         .all(|(left, right)| (*left - *right).abs() <= tolerance)
 }
 
-fn inspect_model(mut args: impl Iterator<Item = String>) -> miniinfer_core::error::Result<()> {
+fn inspect_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let flag = match args.next() {
         Some(flag) => flag,
         None => {
@@ -117,11 +123,11 @@ fn inspect_model(mut args: impl Iterator<Item = String>) -> miniinfer_core::erro
     println!("Inspecting model at path: {model_path}");
 
     let config_path = Path::new(&model_path).join("config.json");
-    let config = miniinfer_core::model::loader::load_config(config_path)?;
+    let config = load_config(config_path)?;
 
     let weights_path = Path::new(&model_path).join("weights.json");
-    if config.architecture == miniinfer_core::model::config::Architecture::Gpt2 {
-        let weights = miniinfer_core::model::loader::load_gpt2_weights(weights_path)?;
+    if config.architecture == Architecture::Gpt2 {
+        let weights = load_gpt2_weights(weights_path)?;
         weights.validate_shapes(&config)?;
 
         print_config(&config);
@@ -130,7 +136,7 @@ fn inspect_model(mut args: impl Iterator<Item = String>) -> miniinfer_core::erro
     Ok(())
 }
 
-fn print_config(config: &miniinfer_core::model::config::ModelConfig) {
+fn print_config(config: &ModelConfig) {
     let rows = [
         ("Architecture", format!("{:?}", config.architecture)),
         ("Vocab size", config.vocab_size.to_string()),
@@ -148,7 +154,7 @@ fn print_config(config: &miniinfer_core::model::config::ModelConfig) {
     }
 }
 
-fn print_gpt2_weights(weights: &miniinfer_core::model::gpt2::Gpt2Weights) {
+fn print_gpt2_weights(weights: &Gpt2Weights) {
     println!("GPT-2 Weights:");
     println!("  Token embedding: {:?}", weights.wte.shape());
     println!("  Position embedding: {:?}", weights.wpe.shape());
@@ -156,4 +162,60 @@ fn print_gpt2_weights(weights: &miniinfer_core::model::gpt2::Gpt2Weights) {
     println!("  Final layer norm weight: {:?}", weights.ln_f_weight.shape());
     println!("  Final layer norm bias: {:?}", weights.ln_f_bias.shape());
     println!("  LM head weight: {:?}", weights.lm_head_weight.shape());
+}
+
+fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut model_path: Option<String> = None;
+    let mut tokens: Option<String> = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--model" => {
+                model_path = args.next();
+            }
+            "--tokens" => {
+                tokens = args.next();
+            }
+            other => {
+                eprintln!("Unknown run option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let model_path = match model_path {
+        Some(path) => path,
+        None => {
+            eprintln!("Usage: miniinfer run --model <path> --tokens <ids>");
+            std::process::exit(1);
+        }
+    };
+
+    let tokens = match tokens {
+        Some(tokens) => tokens,
+        None => {
+            eprintln!("Usage: miniinfer run --model <path> --tokens <ids>");
+            std::process::exit(1);
+        }
+    };
+    let token_ids: Vec<usize> = tokens
+    .split(',')
+    .map(|part| part.parse::<usize>())
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to parse token ids: {error}"),
+    })?;
+
+    let config_path = Path::new(&model_path).join("config.json");
+    let weights_path = Path::new(&model_path).join("weights.json");
+
+    let config = load_config(config_path)?;
+    let weights = load_gpt2_weights(weights_path)?;
+
+    weights.validate_shapes(&config)?;
+
+    let logits = weights.forward(&config, &token_ids)?;
+
+    println!("Logits shape: {:?}", logits.shape());
+    println!("Logits data: {:?}", logits.data());
+
+    Ok(())
 }
