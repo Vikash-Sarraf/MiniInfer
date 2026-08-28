@@ -1,7 +1,5 @@
 use crate::{
-    error::{MiniInferError, Result},
-    ops::{layer_norm, matmul},
-    tensor::Tensor,
+    error::{MiniInferError, Result}, ops::{gelu, layer_norm, matmul, softmax, vector_add}, tensor::Tensor,
 };
 
 use super::validate_shape;
@@ -59,6 +57,39 @@ impl Gpt2BlockWeights {
         Tensor::new(vec![seq_len, hidden_size], output)
     }
 
+    pub fn apply_ln_2(&self, hidden: &Tensor, epsilon: f32) -> Result<Tensor> {
+        if hidden.shape().len() != 2 {
+            return Err(MiniInferError::WrongRank {
+                expected: 2,
+                actual: hidden.shape().len(),
+            });
+        }
+        let seq_len = hidden.shape()[0];
+        let hidden_size = hidden.shape()[1];
+
+        validate_shape(&self.ln_2_weight, &[hidden_size])?;
+        validate_shape(&self.ln_2_bias, &[hidden_size])?;
+
+        let mut output = Vec::with_capacity(seq_len * hidden_size);
+
+        for row in 0..seq_len {
+            let mut row_values = Vec::with_capacity(hidden_size);
+            for col in 0..hidden_size {
+                row_values.push(hidden.get_2d(row, col)?);
+            }
+
+            let normalized = layer_norm::layer_norm(
+                &row_values,
+                self.ln_2_weight.data(),
+                self.ln_2_bias.data(),
+                epsilon,
+            )?;
+            output.extend(normalized);
+        }
+        Tensor::new(vec![seq_len, hidden_size], output)
+    }
+
+
     pub fn project_qkv(&self, hidden: &Tensor) -> Result<Tensor> {
         if hidden.shape().len() != 2 {
             return Err(MiniInferError::WrongRank {
@@ -87,15 +118,127 @@ impl Gpt2BlockWeights {
         Tensor::new(vec![seq_len, 3 * hidden_size], output)
     }
 
-    pub fn attention_weights(&self, hidden: &Tensor, head_dim: usize) -> Result<Tensor> {
+    fn attention_context(&self, hidden: &Tensor, head_dim: usize) -> Result<Tensor> {
         let qkv = self.project_qkv(hidden)?;
-        let (query, key, _value) = split_qkv(&qkv)?;
+        let (query, key, value) = split_qkv(&qkv)?;
 
-        attention_scores(&query, &key, head_dim)
+        let scores = attention_scores(&query, &key, head_dim)?;
+        let probabilities = causal_softmax(&scores)?;
+
+        attention_output(&probabilities, &value)
     }
+
+    pub fn apply_attention_sublayer(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        epsilon: f32,
+    ) -> Result<Tensor> {
+        let normalized = self.apply_ln_1(hidden, epsilon)?;
+        let context = self.attention_context(&normalized, head_dim)?;
+
+        if context.shape().len() != 2 {
+            return Err(MiniInferError::WrongRank {
+                expected: 2,
+                actual: context.shape().len(),
+            });
+        }
+
+        let seq_len = context.shape()[0];
+        let hidden_size = context.shape()[1];
+
+        validate_shape(&self.attn_c_proj_weight, &[hidden_size, hidden_size])?;
+        validate_shape(&self.attn_c_proj_bias, &[hidden_size])?;
+
+        let projected = matmul::matmul(&context, &self.attn_c_proj_weight)?;
+        let mut projected_with_bias = Vec::with_capacity(seq_len * hidden_size);
+
+        for row in 0..seq_len {
+            for col in 0..hidden_size {
+                let value = projected.get_2d(row, col)? + self.attn_c_proj_bias.get_1d(col)?;
+                projected_with_bias.push(value);
+            }
+        }
+
+        let projected = Tensor::new(vec![seq_len, hidden_size], projected_with_bias)?;
+        let output = vector_add::add(hidden.data(), projected.data())?;
+
+        Tensor::new(hidden.shape().to_vec(), output)
+    }
+
+    pub fn apply_mlp(&self, hidden: &Tensor) -> Result<Tensor> {
+        if hidden.shape().len() != 2 {
+            return Err(MiniInferError::WrongRank {
+                expected: 2,
+                actual: hidden.shape().len(),
+            });
+        }
+
+        let seq_len = hidden.shape()[0];
+        let hidden_size = hidden.shape()[1];
+
+        validate_shape(&self.c_fc_weight, &[hidden_size, self.c_fc_bias.shape()[0]])?;
+
+        let intermediate_size = self.c_fc_bias.shape()[0];
+
+        validate_shape(&self.c_fc_bias, &[intermediate_size])?;
+        validate_shape(&self.mlp_c_proj_weight, &[intermediate_size, hidden_size])?;
+        validate_shape(&self.mlp_c_proj_bias, &[hidden_size])?;
+
+        let expanded = matmul::matmul(hidden, &self.c_fc_weight)?;
+        let expanded_data = add_bias_rows(&expanded, &self.c_fc_bias)?;
+        let expanded = Tensor::new(vec![seq_len, intermediate_size], expanded_data)?;
+
+        let activated_data = gelu::gelu(expanded.data())?;
+        let activated = Tensor::new(vec![seq_len, intermediate_size], activated_data)?;
+
+        let projected = matmul::matmul(&activated, &self.mlp_c_proj_weight)?;
+        let projected_data = add_bias_rows(&projected, &self.mlp_c_proj_bias)?;
+
+        Tensor::new(vec![seq_len, hidden_size], projected_data)
+    }
+
+    pub fn apply_mlp_sublayer(&self, hidden: &Tensor, epsilon: f32) -> Result<Tensor> {
+        let normalized = self.apply_ln_2(hidden, epsilon)?;
+
+        let mlp_output = self.apply_mlp(&normalized)?;
+
+        let output = vector_add::add(hidden.data(), mlp_output.data())?;
+
+        Tensor::new(hidden.shape().to_vec(), output)
+    }
+
+    pub fn forward(&self, hidden: &Tensor, head_dim: usize, epsilon: f32) -> Result<Tensor> {
+        let x = self.apply_attention_sublayer(hidden, head_dim, epsilon)?;
+        self.apply_mlp_sublayer(&x, epsilon)
+    }
+
 }
 
-#[allow(dead_code)]
+fn add_bias_rows(matrix: &Tensor, bias: &Tensor) -> Result<Vec<f32>> {
+    if matrix.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: matrix.shape().len(),
+        });
+    }
+
+    let rows = matrix.shape()[0];
+    let cols = matrix.shape()[1];
+
+    validate_shape(bias, &[cols])?;
+
+    let mut output = Vec::with_capacity(rows * cols);
+
+    for row in 0..rows {
+        for col in 0..cols {
+            output.push(matrix.get_2d(row, col)? + bias.get_1d(col)?);
+        }
+    }
+
+    Ok(output)
+}
+
 pub(crate) fn split_qkv(qkv: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
     if qkv.shape().len() != 2 {
         return Err(MiniInferError::WrongRank {
@@ -132,7 +275,6 @@ pub(crate) fn split_qkv(qkv: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
     ))
 }
 
-#[allow(dead_code)]
 pub(crate) fn attention_scores(query: &Tensor, key: &Tensor, head_dim: usize) -> Result<Tensor> {
     if query.shape().len() != 2 {
         return Err(MiniInferError::WrongRank {
@@ -182,6 +324,45 @@ pub(crate) fn attention_scores(query: &Tensor, key: &Tensor, head_dim: usize) ->
     }
 
     Tensor::new(vec![query_seq_len, key_seq_len], output)
+}
+
+fn causal_softmax(scores: &Tensor) -> Result<Tensor> {
+    if scores.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank { expected: 2, actual: scores.shape().len() });
+    }
+    let rows = scores.shape()[0];
+    let cols = scores.shape()[1];
+
+    if rows != cols {
+        return Err(MiniInferError::InvalidTensorShape {
+            expected: vec![rows, rows],
+            actual: scores.shape().to_vec(),
+        });
+    }
+
+    let mut output = Vec::with_capacity(rows * cols);
+
+    for row in 0..rows {
+        let mut visible = Vec::with_capacity(rows + 1);
+        for col in 0..=row {
+            visible.push(scores.get_2d(row, col)?);
+        }
+        let softmax_data = softmax::softmax(&visible)?;
+
+        for prob in softmax_data {
+            output.push(prob);
+        }
+
+        for _ in (row + 1)..cols {
+            output.push(0.0);
+        }
+
+    }
+    Tensor::new(vec![rows, cols], output)
+}
+
+fn attention_output(probabilities: &Tensor, value: &Tensor) -> Result<Tensor> {
+    matmul::matmul(probabilities, value)
 }
 
 #[cfg(test)]
@@ -395,5 +576,244 @@ mod tests {
                 message: "head_dim must be greater than zero".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn causal_softmax_masks_future_positions() {
+        let scores = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            .expect("valid scores");
+
+        let probabilities = causal_softmax(&scores).expect("causal softmax should succeed");
+
+        let expected = [1.0, 0.0, 0.26894143, 0.7310586];
+        assert_eq!(probabilities.shape(), &[2, 2]);
+        assert!(
+            probabilities
+                .data()
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| (*actual - *expected).abs() < 1e-6)
+        );
+    }
+
+    #[test]
+    fn causal_softmax_rejects_non_2d_scores() {
+        let scores = Tensor::new(vec![4], vec![1.0, 2.0, 3.0, 4.0]).expect("valid scores");
+
+        let err = causal_softmax(&scores).expect_err("1D scores should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::WrongRank {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn causal_softmax_rejects_non_square_scores() {
+        let scores = Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .expect("valid scores");
+
+        let err = causal_softmax(&scores).expect_err("non-square scores should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![2, 2],
+                actual: vec![2, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn apply_attention_sublayer_projects_context_and_adds_residual() {
+        let block = Gpt2BlockWeights {
+            ln_1_weight: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid ln_1 weight"),
+            ln_1_bias: Tensor::new(vec![2], vec![1.0, 0.0]).expect("valid ln_1 bias"),
+            c_attn_weight: Tensor::new(
+                vec![2, 6],
+                vec![
+                    1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                    0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+                ],
+            )
+            .expect("valid c_attn weight"),
+            c_attn_bias: Tensor::new(vec![6], vec![0.0; 6]).expect("valid c_attn bias"),
+            attn_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
+                .expect("valid attention projection weight"),
+            attn_c_proj_bias: Tensor::new(vec![2], vec![0.0, 0.0])
+                .expect("valid attention projection bias"),
+            ln_2_weight: tensor(&[2]),
+            ln_2_bias: tensor(&[2]),
+            c_fc_weight: tensor(&[2, 8]),
+            c_fc_bias: tensor(&[8]),
+            mlp_c_proj_weight: tensor(&[8, 2]),
+            mlp_c_proj_bias: tensor(&[2]),
+        };
+        let hidden = Tensor::new(vec![2, 2], vec![10.0, 20.0, 30.0, 40.0]).expect("valid hidden");
+
+        let output = block
+            .apply_attention_sublayer(&hidden, 2, 1e-5)
+            .expect("attention sublayer should succeed");
+
+        let expected = [11.0, 20.0, 31.0, 40.0];
+        assert_eq!(output.shape(), &[2, 2]);
+        assert!(
+            output
+                .data()
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| (*actual - *expected).abs() < 1e-6)
+        );
+    }
+
+    #[test]
+    fn apply_attention_sublayer_rejects_bad_projection_weight_shape() {
+        let block = Gpt2BlockWeights {
+            ln_1_weight: tensor(&[2]),
+            ln_1_bias: tensor(&[2]),
+            c_attn_weight: Tensor::new(
+                vec![2, 6],
+                vec![
+                    1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                    0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+                ],
+            )
+            .expect("valid c_attn weight"),
+            c_attn_bias: Tensor::new(vec![6], vec![0.0; 6]).expect("valid c_attn bias"),
+            attn_c_proj_weight: tensor(&[2, 3]),
+            attn_c_proj_bias: tensor(&[2]),
+            ln_2_weight: tensor(&[2]),
+            ln_2_bias: tensor(&[2]),
+            c_fc_weight: tensor(&[2, 8]),
+            c_fc_bias: tensor(&[8]),
+            mlp_c_proj_weight: tensor(&[8, 2]),
+            mlp_c_proj_bias: tensor(&[2]),
+        };
+        let hidden = Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).expect("valid hidden");
+
+        let err = block
+            .apply_attention_sublayer(&hidden, 2, 1e-5)
+            .expect_err("bad attention projection shape should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![2, 2],
+                actual: vec![2, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn add_bias_rows_adds_bias_to_each_row() {
+        let matrix = Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .expect("valid matrix");
+        let bias = Tensor::new(vec![3], vec![0.1, 0.2, 0.3]).expect("valid bias");
+
+        let output = add_bias_rows(&matrix, &bias).expect("bias add should succeed");
+
+        assert_eq!(output, vec![1.1, 2.2, 3.3, 4.1, 5.2, 6.3]);
+    }
+
+    #[test]
+    fn add_bias_rows_rejects_bad_bias_shape() {
+        let matrix = Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .expect("valid matrix");
+        let bias = Tensor::new(vec![2], vec![0.1, 0.2]).expect("valid bias");
+
+        let err = add_bias_rows(&matrix, &bias).expect_err("bad bias shape should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![3],
+                actual: vec![2],
+            }
+        );
+    }
+
+    #[test]
+    fn apply_mlp_projects_activated_hidden() {
+        let block = Gpt2BlockWeights {
+            ln_1_weight: tensor(&[2]),
+            ln_1_bias: tensor(&[2]),
+            c_attn_weight: tensor(&[2, 6]),
+            c_attn_bias: tensor(&[6]),
+            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_bias: tensor(&[2]),
+            ln_2_weight: tensor(&[2]),
+            ln_2_bias: tensor(&[2]),
+            c_fc_weight: Tensor::new(vec![2, 2], vec![0.0, 0.0, 0.0, 0.0])
+                .expect("valid mlp expansion weight"),
+            c_fc_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid mlp expansion bias"),
+            mlp_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
+                .expect("valid mlp projection weight"),
+            mlp_c_proj_bias: Tensor::new(vec![2], vec![0.5, -0.5])
+                .expect("valid mlp projection bias"),
+        };
+        let hidden = Tensor::new(vec![1, 2], vec![3.0, 4.0]).expect("valid hidden");
+
+        let output = block.apply_mlp(&hidden).expect("MLP should succeed");
+
+        assert_eq!(output.shape(), &[1, 2]);
+        assert_eq!(output.data(), &[0.5, -0.5]);
+    }
+
+    #[test]
+    fn apply_mlp_sublayer_normalizes_mlp_input_and_adds_residual() {
+        let block = Gpt2BlockWeights {
+            ln_1_weight: tensor(&[2]),
+            ln_1_bias: tensor(&[2]),
+            c_attn_weight: tensor(&[2, 6]),
+            c_attn_bias: tensor(&[6]),
+            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_bias: tensor(&[2]),
+            ln_2_weight: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid ln_2 weight"),
+            ln_2_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid ln_2 bias"),
+            c_fc_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
+                .expect("valid mlp expansion weight"),
+            c_fc_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid mlp expansion bias"),
+            mlp_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
+                .expect("valid mlp projection weight"),
+            mlp_c_proj_bias: Tensor::new(vec![2], vec![0.0, 0.0])
+                .expect("valid mlp projection bias"),
+        };
+        let hidden = Tensor::new(vec![1, 2], vec![3.0, 4.0]).expect("valid hidden");
+
+        let output = block
+            .apply_mlp_sublayer(&hidden, 1e-5)
+            .expect("MLP sublayer should succeed");
+
+        assert_eq!(output.shape(), &[1, 2]);
+        assert_eq!(output.data(), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn forward_applies_attention_then_mlp_residual_blocks() {
+        let block = Gpt2BlockWeights {
+            ln_1_weight: tensor(&[2]),
+            ln_1_bias: tensor(&[2]),
+            c_attn_weight: tensor(&[2, 6]),
+            c_attn_bias: tensor(&[6]),
+            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_bias: tensor(&[2]),
+            ln_2_weight: tensor(&[2]),
+            ln_2_bias: tensor(&[2]),
+            c_fc_weight: tensor(&[2, 2]),
+            c_fc_bias: tensor(&[2]),
+            mlp_c_proj_weight: tensor(&[2, 2]),
+            mlp_c_proj_bias: tensor(&[2]),
+        };
+        let hidden = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).expect("valid hidden");
+
+        let output = block
+            .forward(&hidden, 2, 1e-5)
+            .expect("block forward should succeed");
+
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(output.data(), &[1.0, 2.0, 3.0, 4.0]);
     }
 }
