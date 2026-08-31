@@ -52,10 +52,16 @@ struct Gpt2WeightsFile {
     lm_head_weight: TensorFile,
 }
 
+#[derive(Deserialize)]
+struct VocabFile {
+    tokens: Vec<String>,
+}
+
 pub enum LoadedModel {
     Gpt2 {
         config: ModelConfig,
         weights: Gpt2Weights,
+        vocab: Vec<String>,
     },
 }
 
@@ -68,15 +74,21 @@ impl LoadedModel {
 
     pub fn validate(&self) -> Result<()> {
         match self {
-            LoadedModel::Gpt2 { config, weights } => weights.validate_shapes(config),
+            LoadedModel::Gpt2 { config, weights, .. } => weights.validate_shapes(config),
         }
     }
 
     pub fn forward(&self, token_ids: &[usize]) -> Result<Tensor> {
         match self {
-            LoadedModel::Gpt2 { config, weights } => {
+            LoadedModel::Gpt2 { config, weights, .. } => {
                 weights.forward(config, token_ids)
             }
+        }
+    }
+
+    pub fn vocab(&self) -> &[String] {
+        match self {
+            LoadedModel::Gpt2 { vocab, .. } => vocab,
         }
     }
 }
@@ -91,8 +103,19 @@ pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
         Architecture::Gpt2 => {
             let weights = load_gpt2_weights(model_dir.join("weights.json"))?;
             weights.validate_shapes(&config)?;
+            let vocab = load_vocab(model_dir.join("vocab.json"))?;
 
-            Ok(LoadedModel::Gpt2 { config, weights})
+            if vocab.len() != config.vocab_size {
+                return Err(MiniInferError::InvalidConfig {
+                    message: format!(
+                        "vocab length {} must match config vocab_size {}",
+                        vocab.len(),
+                        config.vocab_size
+                    ),
+                });
+            }
+
+            Ok(LoadedModel::Gpt2 { config, weights, vocab })
         }
     }
 }
@@ -190,6 +213,20 @@ fn tensor_from_file(tensor: TensorFile) -> Result<Tensor> {
     Tensor::new(tensor.shape, tensor.data)
 }
 
+fn load_vocab(path: impl AsRef<Path>) -> Result<Vec<String>> {
+    let path = path.as_ref();
+    let file = File::open(path).map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to open vocab {}: {error}", path.display()),
+    })?;
+
+    let vocab_file: VocabFile =
+        serde_json::from_reader(file).map_err(|error| MiniInferError::InvalidConfig {
+            message: format!("failed to parse vocab {}: {error}", path.display()),
+        })?;
+
+    Ok(vocab_file.tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +292,7 @@ mod tests {
         assert_eq!(config.num_heads, 2);
         assert_eq!(config.intermediate_size, 16);
         assert_eq!(config.layer_norm_epsilon, 1e-5);
+        assert_eq!(model.vocab().len(), config.vocab_size);
 
         model.validate().expect("tiny GPT-2 model should validate");
     }

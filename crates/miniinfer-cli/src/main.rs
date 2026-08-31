@@ -1,8 +1,9 @@
 use miniinfer_core::{
-    error::{MiniInferError, Result}, model::{
-        config::ModelConfig,
-        loader::load_model,
-    }, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, tensor::Tensor, tokenizer::tokenizer::{TinyTokenizer, Tokenizer}
+    error::{MiniInferError, Result},
+    model::{config::ModelConfig, loader::load_model},
+    ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
+    tensor::Tensor,
+    tokenizer::tokenizer::{TinyTokenizer, Tokenizer},
 };
 
 fn main() -> Result<()> {
@@ -145,10 +146,6 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut model_path: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut tokens: Option<String> = None;
-    let tokenizer = TinyTokenizer::new(vec![
-        "hello".to_string(),
-        "world".to_string(),
-    ]);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--model" => {
@@ -174,8 +171,13 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
+    let model = load_model(model_path)?;
+    model.validate()?;
     let token_ids = match (prompt, tokens) {
-        (Some(prompt), None) => tokenizer.encode(&prompt)?,
+        (Some(prompt), None) => {
+            let tokenizer = TinyTokenizer::new(model.vocab().to_vec());
+            tokenizer.encode(&prompt)?
+        }
         (None, Some(tokens)) => parse_token_ids(&tokens)?,
         (Some(_), Some(_)) => {
             eprintln!("Use either --prompt or --tokens, not both");
@@ -187,8 +189,6 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    let model = load_model(model_path)?;
-    model.validate()?;
     let logits = model.forward(&token_ids)?;
     println!("Logits shape: {:?}", logits.shape());
     println!("Logits data: {:?}", logits.data());
