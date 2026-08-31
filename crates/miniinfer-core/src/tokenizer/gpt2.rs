@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use crate::error::{MiniInferError, Result};
+use crate::{error::{MiniInferError, Result}, tokenizer::tokenizer::Tokenizer};
 
 #[derive(Debug)]
 pub struct Gpt2Tokenizer {
@@ -123,6 +123,19 @@ impl Gpt2Tokenizer {
         self.apply_bpe_merges(&pieces)
     }
 
+    pub fn encode_word(&self, word: &str) -> Result<Vec<usize>> {
+        let tokens = self.tokenize_word(word);
+        let mut token_ids = Vec::new();
+
+        for token in tokens {
+            match self.token_to_id(&token) {
+                Some(id) => token_ids.push(id),
+                None => return Err(MiniInferError::InvalidInput),
+            }
+        }
+
+        Ok(token_ids)
+    }
 }
 
 fn merge_once(
@@ -168,6 +181,34 @@ fn merge_once(
     Some(output)
 }
 
+impl Tokenizer for Gpt2Tokenizer {
+    fn encode(&self, text: &str) -> Result<Vec<usize>> {
+        let mut token_ids = Vec::new();
+
+        for word in text.split_whitespace() {
+            let ids = self.encode_word(word)?;
+            token_ids.extend(ids);
+        }
+
+        Ok(token_ids)
+    }
+
+    fn decode(&self, token_ids: &[usize]) -> Result<String> {
+        let mut words = Vec::new();
+
+        for &token_id in token_ids {
+            let token = self.id_to_token(token_id);
+            match token {
+                Some(token) => words.push(token.to_string()),
+                None => {
+                    return Err(MiniInferError::IndexOutOfBounds { index: token_id, len: self.id_to_token.len() });
+                }
+            }
+        }
+
+        Ok(words.join(" "))
+    }
+}
 
 
 #[cfg(test)]
@@ -178,6 +219,19 @@ use super::*;
         HashMap::from([
             ("hello".to_string(), 0),
             ("world".to_string(), 1),
+        ])
+    }
+
+    fn hello_world_merges() -> HashMap<(String, String), usize> {
+        HashMap::from([
+            (("h".to_string(), "e".to_string()), 0),
+            (("he".to_string(), "l".to_string()), 1),
+            (("hel".to_string(), "l".to_string()), 2),
+            (("hell".to_string(), "o".to_string()), 3),
+            (("w".to_string(), "o".to_string()), 4),
+            (("wo".to_string(), "r".to_string()), 5),
+            (("wor".to_string(), "l".to_string()), 6),
+            (("worl".to_string(), "d".to_string()), 7),
         ])
     }
 
@@ -371,5 +425,67 @@ fn tokenize_word_applies_bpe_merges_to_word() {
 
     let cat = tokenizer.tokenize_word("cat");
     assert_eq!(cat, vec!["c".to_string(), "a".to_string(), "t".to_string()]);
+}
+
+#[test]
+fn encode_word_returns_token_ids_for_known_tokens() {
+    let merges = HashMap::from([
+        (("h".to_string(), "e".to_string()), 0),
+        (("he".to_string(), "l".to_string()), 1),
+        (("hel".to_string(), "l".to_string()), 2),
+        (("hell".to_string(), "o".to_string()), 3),
+    ]);
+
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), merges)
+        .expect("valid vocab and merges should build tokenizer");
+    let token_ids = tokenizer.encode_word("hello").expect("encoding should succeed");
+
+    assert_eq!(token_ids, vec![0]);
+}
+
+#[test]
+fn gpt2_tokenizer_encode_uses_bpe_word_tokens() {
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), hello_world_merges())
+        .expect("valid vocab and merges should build tokenizer");
+
+    let token_ids = tokenizer
+        .encode("hello world")
+        .expect("encoding should succeed");
+
+    assert_eq!(token_ids, vec![0, 1]);
+}
+
+#[test]
+fn gpt2_tokenizer_decode_joins_tokens_with_spaces() {
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), HashMap::new())
+        .expect("valid vocab should build tokenizer");
+
+    let text = tokenizer.decode(&[0, 1]).expect("decoding should succeed");
+
+    assert_eq!(text, "hello world");
+}
+
+#[test]
+fn gpt2_tokenizer_encode_rejects_unknown_bpe_piece() {
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), HashMap::new())
+        .expect("valid vocab should build tokenizer");
+
+    let err = tokenizer
+        .encode("cat")
+        .expect_err("unknown BPE piece should fail");
+
+    assert_eq!(err, MiniInferError::InvalidInput);
+}
+
+#[test]
+fn gpt2_tokenizer_decode_rejects_out_of_bounds_token_id() {
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), HashMap::new())
+        .expect("valid vocab should build tokenizer");
+
+    let err = tokenizer
+        .decode(&[0, 2])
+        .expect_err("out-of-bounds token ID should fail");
+
+    assert_eq!(err, MiniInferError::IndexOutOfBounds { index: 2, len: 2 });
 }
 }
