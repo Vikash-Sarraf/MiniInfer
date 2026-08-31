@@ -1,9 +1,5 @@
 use miniinfer_core::{
-    error::{MiniInferError, Result},
-    model::{config::ModelConfig, loader::load_model},
-    ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
-    tensor::Tensor,
-    tokenizer::tokenizer::{TinyTokenizer, Tokenizer},
+    error::{MiniInferError, Result}, model::{config::ModelConfig, loader::load_model}, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, sampling::{GreedySampler, Sampler}, tensor::Tensor, tokenizer::{tokenizer::{TinyTokenizer, Tokenizer}},
 };
 
 fn main() -> Result<()> {
@@ -192,7 +188,12 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let logits = model.forward(&token_ids)?;
     println!("Logits shape: {:?}", logits.shape());
     println!("Logits data: {:?}", logits.data());
-
+    let mut sampler = GreedySampler;
+    let next_token_id = sampler.sample(&logits)?;
+    println!("Next token ID: {}", next_token_id);
+    let tokenizer = TinyTokenizer::new(model.vocab().to_vec());
+    let decoded_token = tokenizer.decode(&[next_token_id])?;
+    println!("Decoded next token: {}", decoded_token);
     Ok(())
 }
 
