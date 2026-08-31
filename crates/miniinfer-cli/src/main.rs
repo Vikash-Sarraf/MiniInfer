@@ -1,11 +1,8 @@
-use std::path::Path;
-
 use miniinfer_core::{
     error::{MiniInferError, Result},
     model::{
-        config::{Architecture, ModelConfig},
-        gpt2::Gpt2Weights,
-        loader::{load_config, load_gpt2_weights},
+        config::ModelConfig,
+        loader::load_model,
     },
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     tensor::Tensor,
@@ -32,7 +29,7 @@ fn print_help() {
     println!(
         "Usage: miniinfer <command> [options]
 Commands:
-    run       Run inference on a model (not implemented yet)
+    run       Run inference on a model
     inspect   Inspect a model 
     bench     Benchmark a model (not implemented yet)
     bench-matmul Benchmark reference vs ndarray matmul
@@ -122,17 +119,9 @@ fn inspect_model(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     println!("Inspecting model at path: {model_path}");
 
-    let config_path = Path::new(&model_path).join("config.json");
-    let config = load_config(config_path)?;
-
-    let weights_path = Path::new(&model_path).join("weights.json");
-    if config.architecture == Architecture::Gpt2 {
-        let weights = load_gpt2_weights(weights_path)?;
-        weights.validate_shapes(&config)?;
-
-        print_config(&config);
-        print_gpt2_weights(&weights);
-    }
+    let model = load_model(model_path)?;
+    model.validate()?;
+    print_config(model.config());
     Ok(())
 }
 
@@ -152,16 +141,6 @@ fn print_config(config: &ModelConfig) {
     for (label, value) in rows {
         println!("{label}: {value}");
     }
-}
-
-fn print_gpt2_weights(weights: &Gpt2Weights) {
-    println!("GPT-2 Weights:");
-    println!("  Token embedding: {:?}", weights.wte.shape());
-    println!("  Position embedding: {:?}", weights.wpe.shape());
-    println!("  Blocks: {}", weights.blocks.len());
-    println!("  Final layer norm weight: {:?}", weights.ln_f_weight.shape());
-    println!("  Final layer norm bias: {:?}", weights.ln_f_bias.shape());
-    println!("  LM head weight: {:?}", weights.lm_head_weight.shape());
 }
 
 fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
@@ -204,16 +183,9 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         message: format!("failed to parse token ids: {error}"),
     })?;
 
-    let config_path = Path::new(&model_path).join("config.json");
-    let weights_path = Path::new(&model_path).join("weights.json");
-
-    let config = load_config(config_path)?;
-    let weights = load_gpt2_weights(weights_path)?;
-
-    weights.validate_shapes(&config)?;
-
-    let logits = weights.forward(&config, &token_ids)?;
-
+    let model = load_model(model_path)?;
+    model.validate()?;
+    let logits = model.forward(&token_ids)?;
     println!("Logits shape: {:?}", logits.shape());
     println!("Logits data: {:?}", logits.data());
 

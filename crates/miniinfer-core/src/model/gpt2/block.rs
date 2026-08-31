@@ -1,7 +1,6 @@
 use crate::{
     error::{MiniInferError, Result}, ops::{gelu, layer_norm, matmul, softmax, vector_add}, tensor::Tensor,
 };
-
 use super::validate_shape;
 
 pub struct Gpt2BlockWeights {
@@ -122,10 +121,38 @@ impl Gpt2BlockWeights {
         let qkv = self.project_qkv(hidden)?;
         let (query, key, value) = split_qkv(&qkv)?;
 
-        let scores = attention_scores(&query, &key, head_dim)?;
-        let probabilities = causal_softmax(&scores)?;
+        let hidden_size = query.shape()[1];
 
-        attention_output(&probabilities, &value)
+        if head_dim == 0 {
+            return Err(MiniInferError::InvalidConfig {
+                message: "head_dim must be greater than zero".to_string(),
+            });
+        }
+
+        if hidden_size % head_dim != 0 {
+            return Err(MiniInferError::InvalidConfig {
+                message: format!(
+                    "hidden_size {hidden_size} must be divisible by head_dim {head_dim}"
+                ),
+            });
+        }
+
+        let num_heads = hidden_size / head_dim;
+
+        let query_heads = split_heads(&query, num_heads)?;
+        let key_heads = split_heads(&key, num_heads)?;
+        let value_heads = split_heads(&value, num_heads)?;
+
+        let mut context_heads = Vec::with_capacity(num_heads);
+        for head_index in 0..num_heads {
+            let scores =
+                attention_scores(&query_heads[head_index], &key_heads[head_index], head_dim)?;
+            let probabilities = causal_softmax(&scores)?;
+            let context = attention_output(&probabilities, &value_heads[head_index])?;
+            context_heads.push(context);
+        }
+
+        merge_heads(&context_heads)
     }
 
     pub fn apply_attention_sublayer(
@@ -365,6 +392,100 @@ fn attention_output(probabilities: &Tensor, value: &Tensor) -> Result<Tensor> {
     matmul::matmul(probabilities, value)
 }
 
+fn split_heads(hidden: &Tensor, num_heads: usize) -> Result<Vec<Tensor>> {
+    if hidden.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: hidden.shape().len(),
+        });
+    }
+
+    if num_heads == 0 {
+        return Err(MiniInferError::InvalidConfig {
+            message: "num_heads must be greater than zero".to_string(),
+        });
+    }
+
+    let seq_len = hidden.shape()[0];
+    let hidden_size = hidden.shape()[1];
+
+    if hidden_size % num_heads != 0 {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!(
+                "hidden_size {hidden_size} must be divisible by num_heads {num_heads}"
+            ),
+        });
+    }
+
+    let head_dim = hidden_size / num_heads;
+    let mut heads = Vec::with_capacity(num_heads);
+
+    for head in 0..num_heads {
+        let mut head_data = Vec::with_capacity(seq_len * head_dim);
+        let start_col = head * head_dim;
+
+        for row in 0..seq_len {
+            for offset in 0..head_dim {
+                head_data.push(hidden.get_2d(row, start_col + offset)?);
+            }
+        }
+
+        heads.push(Tensor::new(vec![seq_len, head_dim], head_data)?);
+    }
+
+    Ok(heads)
+}
+
+fn merge_heads(heads: &[Tensor]) -> Result<Tensor> {
+    if heads.is_empty() {
+        return Err(MiniInferError::EmptyInput);
+    }
+
+        // Read shape from first head.
+    if heads[0].shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: heads[0].shape().len(),
+        });
+    }
+
+    let num_heads = heads.len();
+    let seq_len = heads[0].shape()[0];
+    let head_dim = heads[0].shape()[1];
+    let hidden_size = num_heads * head_dim;
+
+    for head in heads {
+        if head.shape().len() != 2 {
+            return Err(MiniInferError::WrongRank {
+                expected: 2,
+                actual: head.shape().len(),
+            });
+        }
+
+        if head.shape() != [seq_len, head_dim] {
+            return Err(MiniInferError::InvalidTensorShape {
+                expected: vec![seq_len, head_dim],
+                actual: head.shape().to_vec(),
+            });
+        }
+    }
+
+    let mut output = Vec::with_capacity(seq_len * hidden_size);
+
+    for row in 0..seq_len {
+        for head_index in 0..num_heads {
+            for col in 0..head_dim {
+                output.push(heads[head_index].get_2d(row, col)?);
+            }
+        }
+    }
+
+    Tensor::new(vec![seq_len, hidden_size], output)
+}
+
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +544,40 @@ mod tests {
                 .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
         );
     }
+        #[test]
+        fn attention_context_computes_attention_per_head() {
+            let block = Gpt2BlockWeights {
+                c_attn_weight: Tensor::new(
+                    vec![4, 12],
+                    vec![
+                        0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 1.0, 2.0, 3.0,
+                        4.0, 10.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 5.0, 6.0,
+                        7.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0,
+                    ],
+                )
+                .expect("valid c_attn weight"),
+                c_attn_bias: Tensor::new(vec![12], vec![0.0; 12]).expect("valid c_attn bias"),
+                ..tiny_block_weights()
+            };
+            let hidden = Tensor::new(vec![2, 4], vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+                .expect("valid hidden");
+
+            let context = block
+                .attention_context(&hidden, 2)
+                .expect("attention context should succeed");
+
+            let expected = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 7.0, 8.0];
+            assert_eq!(context.shape(), &[2, 4]);
+            assert!(
+                context
+                    .data()
+                    .iter()
+                    .zip(expected.iter())
+                    .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
+            );
+        }
 
     #[test]
     fn apply_ln_1_rejects_non_2d_hidden() {
@@ -816,4 +971,51 @@ mod tests {
         assert_eq!(output.shape(), &[2, 2]);
         assert_eq!(output.data(), &[1.0, 2.0, 3.0, 4.0]);
     }
+
+    #[test]
+fn split_heads_splits_hidden_dimension_into_heads() {
+    let hidden = Tensor::new(
+        vec![2, 4],
+        vec![
+            1.0, 2.0, 3.0, 4.0,
+            5.0, 6.0, 7.0, 8.0,
+        ],
+    )
+    .expect("valid hidden");
+
+    let heads = split_heads(&hidden, 2).expect("split heads should succeed");
+
+    assert_eq!(heads.len(), 2);
+
+    assert_eq!(heads[0].shape(), &[2, 2]);
+    assert_eq!(heads[0].data(), &[1.0, 2.0, 5.0, 6.0]);
+
+    assert_eq!(heads[1].shape(), &[2, 2]);
+    assert_eq!(heads[1].data(), &[3.0, 4.0, 7.0, 8.0]);
+}
+
+#[test]
+fn merge_heads_merges_multiple_heads_into_hidden_dimension() {
+    let head1 = Tensor::new(
+        vec![2, 2],
+        vec![
+            1.0, 2.0,
+            3.0, 4.0,
+        ],
+    )
+    .expect("valid head1");
+    let head2 = Tensor::new(
+        vec![2, 2],
+        vec![
+            5.0, 6.0,
+            7.0, 8.0,
+        ],
+    )
+    .expect("valid head2");
+
+    let merged = merge_heads(&[head1, head2]).expect("merge heads should succeed");
+
+    assert_eq!(merged.shape(), &[2, 4]);
+    assert_eq!(merged.data(), &[1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
+}
 }

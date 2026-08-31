@@ -3,10 +3,7 @@ use std::{fs::File, path::Path};
 use serde::Deserialize;
 
 use crate::{
-    error::{MiniInferError, Result},
-    model::config::{Architecture, ModelConfig},
-    model::gpt2::{Gpt2BlockWeights, Gpt2Weights},
-    tensor::Tensor,
+    error::{MiniInferError, Result}, model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights}}, tensor::Tensor,
 };
 
 #[derive(Deserialize)]
@@ -53,6 +50,51 @@ struct Gpt2WeightsFile {
     ln_f_weight: TensorFile,
     ln_f_bias: TensorFile,
     lm_head_weight: TensorFile,
+}
+
+pub enum LoadedModel {
+    Gpt2 {
+        config: ModelConfig,
+        weights: Gpt2Weights,
+    },
+}
+
+impl LoadedModel {
+    pub fn config(&self) -> &ModelConfig {
+        match self {
+            LoadedModel::Gpt2 { config, .. } => config,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            LoadedModel::Gpt2 { config, weights } => weights.validate_shapes(config),
+        }
+    }
+
+    pub fn forward(&self, token_ids: &[usize]) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights } => {
+                weights.forward(config, token_ids)
+            }
+        }
+    }
+}
+
+
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
+    let model_dir = model_dir.as_ref();
+
+    let config = load_config(model_dir.join("config.json"))?;
+
+    match &config.architecture {
+        Architecture::Gpt2 => {
+            let weights = load_gpt2_weights(model_dir.join("weights.json"))?;
+            weights.validate_shapes(&config)?;
+
+            Ok(LoadedModel::Gpt2 { config, weights})
+        }
+    }
 }
 
 pub fn load_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
@@ -184,5 +226,36 @@ mod tests {
         assert_eq!(weights.wte.shape(), &[8, 4]);
         assert_eq!(weights.blocks.len(), 1);
         assert_eq!(weights.lm_head_weight.shape(), &[4, 8]);
+    }
+
+    #[test]
+    fn loads_tiny_gpt2_model() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let config_path = model_dir.join("config.json");
+        let weights_path = model_dir.join("weights.json");
+        let config = load_config(config_path).expect("tiny GPT-2 config should load");
+        let weights = load_gpt2_weights(weights_path).expect("tiny GPT-2 weights should load");
+
+        weights
+            .validate_shapes(&config)
+            .expect("tiny GPT-2 weights should match config");
+    }
+
+    #[test]
+    fn loads_tiny_gpt2_model_via_loader() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+
+        let config = model.config();
+        assert_eq!(config.architecture, Architecture::Gpt2);
+        assert_eq!(config.vocab_size, 8);
+        assert_eq!(config.max_position_embeddings, 8);
+        assert_eq!(config.hidden_size, 4);
+        assert_eq!(config.num_layers, 1);
+        assert_eq!(config.num_heads, 2);
+        assert_eq!(config.intermediate_size, 16);
+        assert_eq!(config.layer_norm_epsilon, 1e-5);
+
+        model.validate().expect("tiny GPT-2 model should validate");
     }
 }
