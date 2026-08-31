@@ -1,5 +1,10 @@
 use miniinfer_core::{
-    error::{MiniInferError, Result}, model::{config::ModelConfig, loader::load_model}, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, sampling::{GreedySampler, Sampler}, tensor::Tensor, tokenizer::{tokenizer::{TinyTokenizer, Tokenizer}},
+    error::{MiniInferError, Result},
+    model::{config::ModelConfig, loader::load_model},
+    ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
+    runtime::generation,
+    tensor::Tensor,
+    tokenizer::tokenizer::{TinyTokenizer, Tokenizer},
 };
 
 fn main() -> Result<()> {
@@ -142,6 +147,8 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut model_path: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut tokens: Option<String> = None;
+    let mut max_new_tokens = 1;
+
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--model" => {
@@ -152,6 +159,10 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--tokens" => {
                 tokens = args.next();
+            }
+            "--max-new-tokens" => {
+                let value = args.next().ok_or(MiniInferError::InvalidInput)?;
+                max_new_tokens = value.parse().map_err(|_| MiniInferError::InvalidInput)?;
             }
             other => {
                 eprintln!("Unknown run option: {other}");
@@ -185,15 +196,8 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    let logits = model.forward(&token_ids)?;
-    println!("Logits shape: {:?}", logits.shape());
-    println!("Logits data: {:?}", logits.data());
-    let mut sampler = GreedySampler;
-    let next_token_id = sampler.sample(&logits)?;
-    println!("Next token ID: {}", next_token_id);
-    let tokenizer = TinyTokenizer::new(model.vocab().to_vec());
-    let decoded_token = tokenizer.decode(&[next_token_id])?;
-    println!("Decoded next token: {}", decoded_token);
+    let decoded_text = generation::generate_greedy(&model, &token_ids, max_new_tokens)?;
+    println!("Result: {}", decoded_text);
     Ok(())
 }
 
