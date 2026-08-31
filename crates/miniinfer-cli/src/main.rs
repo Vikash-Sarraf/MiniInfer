@@ -1,12 +1,10 @@
 use miniinfer_core::{
-    error::{MiniInferError, Result},
-    model::{
+    error::{MiniInferError, Result}, model::{
         config::ModelConfig,
         loader::load_model,
-    },
-    ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
-    tensor::Tensor,
+    }, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, tensor::Tensor, tokenizer::tokenizer::{TinyTokenizer, Tokenizer}
 };
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
 
@@ -145,11 +143,19 @@ fn print_config(config: &ModelConfig) {
 
 fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut model_path: Option<String> = None;
+    let mut prompt: Option<String> = None;
     let mut tokens: Option<String> = None;
+    let tokenizer = TinyTokenizer::new(vec![
+        "hello".to_string(),
+        "world".to_string(),
+    ]);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--model" => {
                 model_path = args.next();
+            }
+            "--prompt" => {
+                prompt = args.next();
             }
             "--tokens" => {
                 tokens = args.next();
@@ -163,25 +169,23 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let model_path = match model_path {
         Some(path) => path,
         None => {
-            eprintln!("Usage: miniinfer run --model <path> --tokens <ids>");
+            eprintln!("Usage: miniinfer run --model <path> (--prompt <text> | --tokens <ids>)");
             std::process::exit(1);
         }
     };
 
-    let tokens = match tokens {
-        Some(tokens) => tokens,
-        None => {
-            eprintln!("Usage: miniinfer run --model <path> --tokens <ids>");
+    let token_ids = match (prompt, tokens) {
+        (Some(prompt), None) => tokenizer.encode(&prompt)?,
+        (None, Some(tokens)) => parse_token_ids(&tokens)?,
+        (Some(_), Some(_)) => {
+            eprintln!("Use either --prompt or --tokens, not both");
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!("Usage: miniinfer run --model <path> (--prompt <text> | --tokens <ids>)");
             std::process::exit(1);
         }
     };
-    let token_ids: Vec<usize> = tokens
-    .split(',')
-    .map(|part| part.parse::<usize>())
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .map_err(|error| MiniInferError::InvalidConfig {
-        message: format!("failed to parse token ids: {error}"),
-    })?;
 
     let model = load_model(model_path)?;
     model.validate()?;
@@ -190,4 +194,12 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     println!("Logits data: {:?}", logits.data());
 
     Ok(())
+}
+
+fn parse_token_ids(tokens: &str) -> Result<Vec<usize>> {
+    tokens
+        .split(',')
+        .map(|token| token.trim().parse::<usize>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| MiniInferError::InvalidInput)
 }

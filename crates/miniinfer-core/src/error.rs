@@ -31,6 +31,7 @@ pub enum MiniInferError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    InvalidInput,
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;
