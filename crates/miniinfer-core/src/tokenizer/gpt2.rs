@@ -118,6 +118,11 @@ impl Gpt2Tokenizer {
         current
     }
 
+    pub fn tokenize_word(&self, word: &str) -> Vec<String> {
+        let pieces: Vec<String> = word.chars().map(|c| c.to_string()).collect();
+        self.apply_bpe_merges(&pieces)
+    }
+
 }
 
 fn merge_once(
@@ -347,5 +352,24 @@ fn apply_bpe_merges_applies_merges_until_no_more() {
     let output = tokenizer.apply_bpe_merges(&pieces);
 
     assert_eq!(output, vec!["hello".to_string()]);
+}
+
+#[test]
+fn tokenize_word_applies_bpe_merges_to_word() {
+    let merges = HashMap::from([
+        (("h".to_string(), "e".to_string()), 0),
+        (("he".to_string(), "l".to_string()), 1),
+        (("hel".to_string(), "l".to_string()), 2),
+        (("hell".to_string(), "o".to_string()), 3),
+    ]);
+
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), merges)
+        .expect("valid vocab and merges should build tokenizer");
+    let hello = tokenizer.tokenize_word("hello");
+
+    assert_eq!(hello, vec!["hello".to_string()]);
+
+    let cat = tokenizer.tokenize_word("cat");
+    assert_eq!(cat, vec!["c".to_string(), "a".to_string(), "t".to_string()]);
 }
 }
