@@ -105,11 +105,69 @@ impl Gpt2Tokenizer {
             .get(&(left.to_string(), right.to_string()))
             .copied()
     }
+
+    pub fn apply_bpe_merges(
+        &self,
+        pieces: &[String],
+    ) -> Vec<String> {
+        let mut current = pieces.to_vec();
+        while let Some(next) = merge_once(&current, &self.merges) {
+            current = next;
+        }
+
+        current
+    }
+
 }
+
+fn merge_once(
+    pieces: &[String],
+    merges: &HashMap<(String, String), usize>,
+) -> Option<Vec<String>> {
+    if pieces.len() < 2 {
+        return None;
+    }
+
+    let mut best_index: Option<usize> = None;
+    let mut best_rank: Option<usize> = None;
+
+    for index in 0..(pieces.len() - 1) {
+        let pair = (pieces[index].clone(), pieces[index + 1].clone());
+
+        if let Some(&rank) = merges.get(&pair) {
+            if best_rank.is_none() || rank < best_rank.unwrap() {
+                best_rank = Some(rank);
+                best_index = Some(index);
+            }
+        }
+    }
+
+    let best_index = match best_index {
+        Some(index) => index,
+        None => return None,
+    };
+
+    let mut output = Vec::with_capacity(pieces.len() - 1);
+    let mut index = 0;
+
+    while index < pieces.len() {
+        if index == best_index {
+            output.push(format!("{}{}", pieces[index], pieces[index + 1]));
+            index += 2;
+        } else {
+            output.push(pieces[index].clone());
+            index += 1;
+        }
+    }
+
+    Some(output)
+}
+
+
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+use super::*;
 
     fn tiny_vocab() -> HashMap<String, usize> {
         HashMap::from([
@@ -238,4 +296,56 @@ mod tests {
         assert_eq!(tokenizer.merge_rank("he", "llo"), Some(1));
         assert_eq!(tokenizer.merge_rank("missing", "pair"), None);
     }
+
+    #[test]
+fn merge_once_merges_best_ranked_pair() {
+    let pieces = vec![
+        "h".to_string(),
+        "e".to_string(),
+        "l".to_string(),
+        "l".to_string(),
+        "o".to_string(),
+    ];
+
+    let merges = HashMap::from([
+        (("h".to_string(), "e".to_string()), 0),
+        (("l".to_string(), "l".to_string()), 1),
+    ]);
+
+    let output = merge_once(&pieces, &merges).expect("one merge should apply");
+
+    assert_eq!(
+        output,
+        vec![
+            "he".to_string(),
+            "l".to_string(),
+            "l".to_string(),
+            "o".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn apply_bpe_merges_applies_merges_until_no_more() {
+    let pieces = vec![
+        "h".to_string(),
+        "e".to_string(),
+        "l".to_string(),
+        "l".to_string(),
+        "o".to_string(),
+    ];
+
+    let merges = HashMap::from([
+        (("h".to_string(), "e".to_string()), 0),
+        (("he".to_string(), "l".to_string()), 1),
+        (("hel".to_string(), "l".to_string()), 2),
+        (("hell".to_string(), "o".to_string()), 3),
+    ]);
+
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), merges)
+        .expect("valid vocab and merges should build tokenizer");
+    let output = tokenizer.apply_bpe_merges(&pieces);
+
+    assert_eq!(output, vec!["hello".to_string()]);
+}
 }
