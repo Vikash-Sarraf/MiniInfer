@@ -161,8 +161,21 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
                 tokens = args.next();
             }
             "--max-new-tokens" => {
-                let value = args.next().ok_or(MiniInferError::InvalidInput)?;
-                max_new_tokens = value.parse().map_err(|_| MiniInferError::InvalidInput)?;
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --max-new-tokens requires a number");
+                        std::process::exit(1);
+                    }
+                };
+
+                max_new_tokens = match value.parse::<usize>() {
+                    Ok(value) => value,
+                        Err(_) => {
+                            eprintln!("Error: --max-new-tokens must be a positive integer");
+                            std::process::exit(1);
+                        }
+                    };
             }
             other => {
                 eprintln!("Unknown run option: {other}");
