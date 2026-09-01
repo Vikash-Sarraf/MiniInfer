@@ -1,4 +1,4 @@
-"""Convert a Hugging Face/OpenAI GPT-2 PyTorch checkpoint to MiniInfer JSON."""
+"""Convert a Hugging Face/OpenAI GPT-2 PyTorch checkpoint to MiniInfer artifacts."""
 
 from __future__ import annotations
 
@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="Validate config and tensor mapping without writing output files.",
 	)
+	parser.add_argument(
+		"--format",
+		choices=["binary", "json"],
+		default="binary",
+		help="Output weight format. Binary writes weights.index.json and weights.bin.",
+	)
 	return parser.parse_args()
 
 
@@ -85,17 +91,20 @@ def main() -> None:
 		print(f"Hidden size: {model_config['hidden_size']}")
 		return
 
-	weights = convert_weights(state, model_config)
-
 	if output_dir.exists():
 		shutil.rmtree(output_dir)
 	output_dir.mkdir(parents=True)
 
 	write_json(output_dir / "config.json", model_config)
-	write_json(output_dir / "weights.json", weights)
+	if args.format == "json":
+		weights = convert_weights(state, model_config)
+		write_json(output_dir / "weights.json", weights)
+	else:
+		write_binary_weights(state, model_config, output_dir)
 	copy_tokenizer_files(source_dir, output_dir)
 
 	print(f"Wrote MiniInfer model to {output_dir}")
+	print(f"Format: {args.format}")
 	print(f"Layers: {model_config['num_layers']}")
 	print(f"Vocab size: {model_config['vocab_size']}")
 	print(f"Hidden size: {model_config['hidden_size']}")
@@ -110,6 +119,31 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 	with path.open("w", encoding="utf-8") as file:
 		json.dump(value, file, separators=(",", ":"))
 		file.write("\n")
+
+
+def write_binary_weights(state: dict[str, Any], config: dict[str, Any], output_dir: Path) -> None:
+	index: dict[str, Any] = {
+		"format_version": 1,
+		"dtype": "f32",
+		"endianness": "little",
+		"lm_head": {"type": "tied"},
+		"tensors": {},
+	}
+	offset = 0
+
+	with (output_dir / "weights.bin").open("wb") as weight_file:
+		for name, tensor in iter_weight_tensors(state, config):
+			data = tensor_bytes(tensor)
+			shape = list(tensor.shape)
+			index["tensors"][name] = {
+				"shape": shape,
+				"offset_bytes": offset,
+				"len": numel(shape),
+			}
+			weight_file.write(data)
+			offset += len(data)
+
+	write_json(output_dir / "weights.index.json", index)
 
 
 def load_torch_state(torch: Any, weights_path: Path) -> dict[str, Any]:
@@ -218,6 +252,46 @@ def convert_weights(state: dict[str, Any], config: dict[str, Any]) -> dict[str, 
 	}
 
 
+def iter_weight_tensors(state: dict[str, Any], config: dict[str, Any]) -> list[tuple[str, Any]]:
+	hidden_size = config["hidden_size"]
+	vocab_size = config["vocab_size"]
+	max_positions = config["max_position_embeddings"]
+	intermediate_size = config["intermediate_size"]
+
+	tensors = [
+		("wte", tensor_for(state, "wte.weight", [vocab_size, hidden_size])),
+		("wpe", tensor_for(state, "wpe.weight", [max_positions, hidden_size])),
+	]
+
+	for layer_index in range(config["num_layers"]):
+		prefix = f"h.{layer_index}"
+		output_prefix = f"blocks.{layer_index}"
+		tensors.extend(
+			[
+				(f"{output_prefix}.ln_1_weight", tensor_for(state, f"{prefix}.ln_1.weight", [hidden_size])),
+				(f"{output_prefix}.ln_1_bias", tensor_for(state, f"{prefix}.ln_1.bias", [hidden_size])),
+				(f"{output_prefix}.c_attn_weight", tensor_for(state, f"{prefix}.attn.c_attn.weight", [hidden_size, 3 * hidden_size])),
+				(f"{output_prefix}.c_attn_bias", tensor_for(state, f"{prefix}.attn.c_attn.bias", [3 * hidden_size])),
+				(f"{output_prefix}.attn_c_proj_weight", tensor_for(state, f"{prefix}.attn.c_proj.weight", [hidden_size, hidden_size])),
+				(f"{output_prefix}.attn_c_proj_bias", tensor_for(state, f"{prefix}.attn.c_proj.bias", [hidden_size])),
+				(f"{output_prefix}.ln_2_weight", tensor_for(state, f"{prefix}.ln_2.weight", [hidden_size])),
+				(f"{output_prefix}.ln_2_bias", tensor_for(state, f"{prefix}.ln_2.bias", [hidden_size])),
+				(f"{output_prefix}.c_fc_weight", tensor_for(state, f"{prefix}.mlp.c_fc.weight", [hidden_size, intermediate_size])),
+				(f"{output_prefix}.c_fc_bias", tensor_for(state, f"{prefix}.mlp.c_fc.bias", [intermediate_size])),
+				(f"{output_prefix}.mlp_c_proj_weight", tensor_for(state, f"{prefix}.mlp.c_proj.weight", [intermediate_size, hidden_size])),
+				(f"{output_prefix}.mlp_c_proj_bias", tensor_for(state, f"{prefix}.mlp.c_proj.bias", [hidden_size])),
+			]
+		)
+
+	tensors.extend(
+		[
+			("ln_f_weight", tensor_for(state, "ln_f.weight", [hidden_size])),
+			("ln_f_bias", tensor_for(state, "ln_f.bias", [hidden_size])),
+		]
+	)
+	return tensors
+
+
 def validate_weight_shapes(state: dict[str, Any], config: dict[str, Any]) -> None:
 	hidden_size = config["hidden_size"]
 	vocab_size = config["vocab_size"]
@@ -267,6 +341,18 @@ def tensor_file(tensor: Any) -> dict[str, Any]:
 		"shape": list(tensor.shape),
 		"data": tensor.reshape(-1).tolist(),
 	}
+
+
+def tensor_bytes(tensor: Any) -> bytes:
+	array = tensor.detach().cpu().float().contiguous().numpy()
+	return array.astype("<f4", copy=False).tobytes(order="C")
+
+
+def numel(shape: list[int]) -> int:
+	result = 1
+	for dimension in shape:
+		result *= dimension
+	return result
 
 
 def copy_tokenizer_files(source_dir: Path, output_dir: Path) -> None:

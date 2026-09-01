@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path};
+use std::{collections::HashMap, fs::File, io::{Read, Seek, SeekFrom}, path::Path};
 
 use serde::Deserialize;
 
@@ -64,6 +64,22 @@ struct LmHeadFile {
 }
 
 #[derive(Deserialize)]
+struct BinaryWeightsIndexFile {
+    format_version: u32,
+    dtype: String,
+    endianness: String,
+    tensors: HashMap<String, BinaryTensorIndexFile>,
+    lm_head: Option<LmHeadFile>,
+}
+
+#[derive(Deserialize)]
+struct BinaryTensorIndexFile {
+    shape: Vec<usize>,
+    offset_bytes: u64,
+    len: usize,
+}
+
+#[derive(Deserialize)]
 struct VocabFile {
     tokens: Vec<String>,
 }
@@ -126,7 +142,7 @@ pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
 
     match &config.architecture {
         Architecture::Gpt2 => {
-            let weights = load_gpt2_weights(model_dir.join("weights.json"))?;
+            let weights = load_gpt2_weights_from_model_dir(model_dir, &config)?;
             weights.validate_shapes(&config)?;
             let tokenizer = load_tokenizer(model_dir)?;
 
@@ -142,6 +158,19 @@ pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
 
             Ok(LoadedModel::Gpt2 { config, weights, tokenizer })
         }
+    }
+}
+
+fn load_gpt2_weights_from_model_dir(model_dir: &Path, config: &ModelConfig) -> Result<Gpt2Weights> {
+    let binary_index_path = model_dir.join("weights.index.json");
+    let binary_data_path = model_dir.join("weights.bin");
+
+    match (binary_index_path.exists(), binary_data_path.exists()) {
+        (true, true) => load_gpt2_binary_weights(binary_index_path, binary_data_path, config),
+        (false, false) => load_gpt2_weights(model_dir.join("weights.json")),
+        _ => Err(MiniInferError::InvalidConfig {
+            message: "binary weights require both weights.index.json and weights.bin".to_string(),
+        }),
     }
 }
 
@@ -234,6 +263,139 @@ pub fn load_gpt2_weights(path: impl AsRef<Path>) -> Result<Gpt2Weights> {
     })
 }
 
+pub fn load_gpt2_binary_weights(
+    index_path: impl AsRef<Path>,
+    data_path: impl AsRef<Path>,
+    config: &ModelConfig,
+) -> Result<Gpt2Weights> {
+    let index_path = index_path.as_ref();
+    let data_path = data_path.as_ref();
+
+    let index_file = File::open(index_path).map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to open weights index {}: {error}", index_path.display()),
+    })?;
+    let index: BinaryWeightsIndexFile = serde_json::from_reader(index_file).map_err(|error| {
+        MiniInferError::InvalidConfig {
+            message: format!("failed to parse weights index {}: {error}", index_path.display()),
+        }
+    })?;
+
+    validate_binary_weight_index(&index)?;
+
+    let mut data_file = File::open(data_path).map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to open weights data {}: {error}", data_path.display()),
+    })?;
+
+    let mut blocks = Vec::with_capacity(config.num_layers);
+    for layer_index in 0..config.num_layers {
+        let prefix = format!("blocks.{layer_index}");
+        blocks.push(Gpt2BlockWeights {
+            ln_1_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_weight"))?,
+            ln_1_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_bias"))?,
+            c_attn_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?,
+            c_attn_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_bias"))?,
+            attn_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?,
+            attn_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_bias"))?,
+            ln_2_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_weight"))?,
+            ln_2_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_bias"))?,
+            c_fc_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?,
+            c_fc_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_bias"))?,
+            mlp_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?,
+            mlp_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_bias"))?,
+        });
+    }
+
+    let lm_head_weight = load_binary_lm_head(&mut data_file, &index)?;
+
+    Ok(Gpt2Weights {
+        wte: read_binary_tensor(&mut data_file, &index, "wte")?,
+        wpe: read_binary_tensor(&mut data_file, &index, "wpe")?,
+        blocks,
+        ln_f_weight: read_binary_tensor(&mut data_file, &index, "ln_f_weight")?,
+        ln_f_bias: read_binary_tensor(&mut data_file, &index, "ln_f_bias")?,
+        lm_head_weight,
+    })
+}
+
+fn validate_binary_weight_index(index: &BinaryWeightsIndexFile) -> Result<()> {
+    if index.format_version != 1 {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported weights index format version {}", index.format_version),
+        });
+    }
+
+    if index.dtype != "f32" {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported weights dtype {}", index.dtype),
+        });
+    }
+
+    if index.endianness != "little" {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported weights endianness {}", index.endianness),
+        });
+    }
+
+    Ok(())
+}
+
+fn load_binary_lm_head(data_file: &mut File, index: &BinaryWeightsIndexFile) -> Result<LMHead> {
+    match index.lm_head.as_ref().map(|lm_head| lm_head.head_type.as_str()) {
+        Some("tied") => Ok(LMHead::Tied),
+        Some("untied") => Ok(LMHead::Untied(read_binary_tensor(data_file, index, "lm_head_weight")?)),
+        Some(other) => Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported LM head type {other}"),
+        }),
+        None if index.tensors.contains_key("lm_head_weight") => {
+            Ok(LMHead::Untied(read_binary_tensor(data_file, index, "lm_head_weight")?))
+        }
+        None => Err(MiniInferError::InvalidConfig {
+            message: "weights index must specify lm_head or lm_head_weight".to_string(),
+        }),
+    }
+}
+
+fn read_binary_tensor(
+    data_file: &mut File,
+    index: &BinaryWeightsIndexFile,
+    name: &str,
+) -> Result<Tensor> {
+    let tensor_index = index.tensors.get(name).ok_or_else(|| MiniInferError::InvalidConfig {
+        message: format!("weights index is missing tensor {name}"),
+    })?;
+    let expected_len: usize = tensor_index.shape.iter().product();
+    if tensor_index.len != expected_len {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!(
+                "tensor {name} index length {} does not match shape product {}",
+                tensor_index.len, expected_len
+            ),
+        });
+    }
+
+    let byte_len = tensor_index.len.checked_mul(4).ok_or_else(|| MiniInferError::InvalidConfig {
+        message: format!("tensor {name} byte length overflow"),
+    })?;
+    let mut bytes = vec![0u8; byte_len];
+    data_file
+        .seek(SeekFrom::Start(tensor_index.offset_bytes))
+        .map_err(|error| MiniInferError::InvalidConfig {
+            message: format!("failed to seek tensor {name}: {error}"),
+        })?;
+    data_file.read_exact(&mut bytes).map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to read tensor {name}: {error}"),
+    })?;
+
+    let mut data = Vec::with_capacity(tensor_index.len);
+    for chunk in bytes.chunks_exact(4) {
+        let mut value_bytes = [0u8; 4];
+        value_bytes.copy_from_slice(chunk);
+        data.push(f32::from_le_bytes(value_bytes));
+    }
+
+    Tensor::new(tensor_index.shape.clone(), data)
+}
+
 fn load_lm_head(
     lm_head: Option<LmHeadFile>,
     legacy_lm_head_weight: Option<TensorFile>,
@@ -306,6 +468,7 @@ fn load_tokenizer(model_dir: &Path) -> Result<LoadedTokenizer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Map, Value};
 
     fn temp_model_dir(test_name: &str) -> std::path::PathBuf {
         let unique_suffix = std::time::SystemTime::now()
@@ -316,6 +479,65 @@ mod tests {
             "miniinfer-{test_name}-{}-{unique_suffix}",
             std::process::id()
         ))
+    }
+
+    fn add_binary_tensor(
+        tensors: &mut Map<String, Value>,
+        bytes: &mut Vec<u8>,
+        name: &str,
+        shape: &[usize],
+    ) {
+        let len = shape.iter().product::<usize>();
+        let offset_bytes = bytes.len();
+        for index in 0..len {
+            bytes.extend_from_slice(&(index as f32).to_le_bytes());
+        }
+        tensors.insert(
+            name.to_string(),
+            json!({
+                "shape": shape,
+                "offset_bytes": offset_bytes,
+                "len": len,
+            }),
+        );
+    }
+
+    fn write_tiny_binary_weights(model_dir: &Path, config: &ModelConfig) {
+        let mut tensors = Map::new();
+        let mut bytes = Vec::new();
+
+        add_binary_tensor(&mut tensors, &mut bytes, "wte", &[config.vocab_size, config.hidden_size]);
+        add_binary_tensor(&mut tensors, &mut bytes, "wpe", &[config.max_position_embeddings, config.hidden_size]);
+        for layer_index in 0..config.num_layers {
+            let prefix = format!("blocks.{layer_index}");
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.ln_1_weight"), &[config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.ln_1_bias"), &[config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.c_attn_weight"), &[config.hidden_size, 3 * config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.c_attn_bias"), &[3 * config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.attn_c_proj_weight"), &[config.hidden_size, config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.attn_c_proj_bias"), &[config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.ln_2_weight"), &[config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.ln_2_bias"), &[config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.c_fc_weight"), &[config.hidden_size, config.intermediate_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.c_fc_bias"), &[config.intermediate_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.mlp_c_proj_weight"), &[config.intermediate_size, config.hidden_size]);
+            add_binary_tensor(&mut tensors, &mut bytes, &format!("{prefix}.mlp_c_proj_bias"), &[config.hidden_size]);
+        }
+        add_binary_tensor(&mut tensors, &mut bytes, "ln_f_weight", &[config.hidden_size]);
+        add_binary_tensor(&mut tensors, &mut bytes, "ln_f_bias", &[config.hidden_size]);
+
+        let index = json!({
+            "format_version": 1,
+            "dtype": "f32",
+            "endianness": "little",
+            "lm_head": { "type": "tied" },
+            "tensors": tensors,
+        });
+
+        std::fs::write(model_dir.join("weights.bin"), bytes)
+            .expect("binary weights should be written");
+        std::fs::write(model_dir.join("weights.index.json"), index.to_string())
+            .expect("binary weights index should be written");
     }
 
     #[test]
@@ -421,6 +643,53 @@ mod tests {
                 message: "weights must specify either lm_head or lm_head_weight, not both".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn load_gpt2_weights_from_model_dir_prefers_binary_weights() {
+        let model_dir = temp_model_dir("binary-weights");
+        std::fs::create_dir_all(&model_dir).expect("model dir should be created");
+        let config = load_config(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2/config.json"),
+        )
+        .expect("tiny GPT-2 config should load");
+        write_tiny_binary_weights(&model_dir, &config);
+        std::fs::write(model_dir.join("weights.json"), "not valid json")
+            .expect("legacy weights placeholder should be written");
+
+        let weights = load_gpt2_weights_from_model_dir(&model_dir, &config)
+            .expect("binary weights should load before legacy JSON");
+
+        assert_eq!(weights.wte.shape(), &[config.vocab_size, config.hidden_size]);
+        assert_eq!(weights.blocks.len(), config.num_layers);
+        assert!(matches!(weights.lm_head_weight, LMHead::Tied));
+
+        std::fs::remove_dir_all(model_dir).expect("temp model dir should be removed");
+    }
+
+    #[test]
+    fn load_gpt2_weights_from_model_dir_rejects_partial_binary_weights() {
+        let model_dir = temp_model_dir("partial-binary-weights");
+        std::fs::create_dir_all(&model_dir).expect("model dir should be created");
+        let config = load_config(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2/config.json"),
+        )
+        .expect("tiny GPT-2 config should load");
+        std::fs::write(model_dir.join("weights.index.json"), "{}").expect("index should be written");
+
+        let err = match load_gpt2_weights_from_model_dir(&model_dir, &config) {
+            Ok(_) => panic!("partial binary weights should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "binary weights require both weights.index.json and weights.bin".to_string(),
+            }
+        );
+
+        std::fs::remove_dir_all(model_dir).expect("temp model dir should be removed");
     }
 
     #[test]
