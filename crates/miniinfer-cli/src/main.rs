@@ -12,6 +12,7 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         Some("run") => run_model(args)?,
         Some("inspect") => inspect_model(args)?,
+        Some("logits") => print_logits(args)?,
         Some("bench") => println!("miniinfer bench: not implemented yet"),
         Some("bench-matmul") => bench_matmul(),
         Some("--help") | Some("-h") | None => print_help(),
@@ -30,6 +31,7 @@ fn print_help() {
 Commands:
     run       Run inference on a model
     inspect   Inspect a model 
+    logits    Print selected logits for debugging/parity checks
     bench     Benchmark a model (not implemented yet)
     bench-matmul Benchmark reference vs ndarray matmul
 Options:
@@ -207,6 +209,80 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     let decoded_text = generation::generate_greedy(&model, &token_ids, max_new_tokens)?;
     println!("Result: {}", decoded_text);
+    Ok(())
+}
+
+fn print_logits(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut model_path: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut tokens: Option<String> = None;
+    let mut selected_ids: Option<String> = None;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--model" => {
+                model_path = args.next();
+            }
+            "--prompt" => {
+                prompt = args.next();
+            }
+            "--tokens" => {
+                tokens = args.next();
+            }
+            "--ids" => {
+                selected_ids = args.next();
+            }
+            other => {
+                eprintln!("Unknown logits option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let model_path = match model_path {
+        Some(path) => path,
+        None => {
+            eprintln!("Usage: miniinfer logits --model <path> (--prompt <text> | --tokens <ids>) --ids <ids>");
+            std::process::exit(1);
+        }
+    };
+    let selected_ids = match selected_ids {
+        Some(ids) => parse_token_ids(&ids)?,
+        None => {
+            eprintln!("Usage: miniinfer logits --model <path> (--prompt <text> | --tokens <ids>) --ids <ids>");
+            std::process::exit(1);
+        }
+    };
+
+    let model = load_model(model_path)?;
+    model.validate()?;
+    let token_ids = match (prompt, tokens) {
+        (Some(prompt), None) => model.encode_prompt(&prompt)?,
+        (None, Some(tokens)) => parse_token_ids(&tokens)?,
+        (Some(_), Some(_)) => {
+            eprintln!("Use either --prompt or --tokens, not both");
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!("Usage: miniinfer logits --model <path> (--prompt <text> | --tokens <ids>) --ids <ids>");
+            std::process::exit(1);
+        }
+    };
+
+    let logits = model.forward(&token_ids)?;
+    if logits.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank { expected: 2, actual: logits.shape().len() });
+    }
+
+    let row = logits.shape()[0] - 1;
+    let vocab_size = logits.shape()[1];
+    for token_id in selected_ids {
+        if token_id >= vocab_size {
+            return Err(MiniInferError::IndexOutOfBounds { index: token_id, len: vocab_size });
+        }
+        println!("{token_id}\t{:.8}", logits.get_2d(row, token_id)?);
+    }
+
     Ok(())
 }
 
