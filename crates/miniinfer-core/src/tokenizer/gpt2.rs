@@ -9,6 +9,26 @@ pub struct Gpt2Tokenizer {
     merges: HashMap<(String, String), usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharCategory {
+    Letter,
+    Number,
+    Space,
+    Other,
+}
+
+fn classify_char(character: char) -> CharCategory {
+    if character.is_whitespace() {
+        CharCategory::Space
+    } else if character.is_alphabetic() {
+        CharCategory::Letter
+    } else if character.is_numeric() {
+        CharCategory::Number
+    } else {
+        CharCategory::Other
+    }
+}
+
 impl Gpt2Tokenizer {
     pub fn parse_merges_text(text: &str) -> Result<HashMap<(String, String), usize>> {
         let mut merges = HashMap::new();
@@ -184,21 +204,51 @@ fn merge_once(
 
 fn pre_tokenize_text(text: &str) -> Vec<String> {
     let mut pre_tokens = Vec::new();
-    let mut word = String::new();
+    let mut current = String::new();
+    let mut current_category: Option<CharCategory> = None;
 
     for character in text.chars() {
-        if character == ' ' {
-            if !word.is_empty() && !word.ends_with(' ') {
-                pre_tokens.push(word);
-                word = String::new();
+        let category = classify_char(character);
+
+        match current_category {
+            None => {
+                current.push(character);
+                current_category = Some(category);
+            }
+            Some(CharCategory::Space) => {
+                current.push(character);
+
+                if category != CharCategory::Space {
+                    current_category = Some(category);
+                }
+            }
+            Some(existing_category) if category == existing_category => {
+                current.push(character);
+            }
+            Some(_) => {
+                if category == CharCategory::Space {
+                    if !current.is_empty() {
+                        pre_tokens.push(current);
+                        current = String::new();
+                    }
+
+                    current.push(character);
+                    current_category = Some(CharCategory::Space);
+                } else {
+                    if !current.is_empty() {
+                        pre_tokens.push(current);
+                        current = String::new();
+                    }
+
+                    current.push(character);
+                    current_category = Some(category);
+                }
             }
         }
-
-        word.push(character);
     }
 
-    if !word.is_empty() {
-        pre_tokens.push(word);
+    if !current.is_empty() {
+        pre_tokens.push(current);
     }
 
     pre_tokens
@@ -654,5 +704,33 @@ fn byte_unicode_maps_round_trip_all_bytes() {
 
         assert_eq!(char_to_byte.get(character), Some(&byte));
     }
+}
+
+#[test]
+fn pre_tokenize_text_splits_categories_and_preserves_spaces() {
+    assert_eq!(pre_tokenize_text("hello"), vec!["hello".to_string()]);
+    assert_eq!(
+        pre_tokenize_text("hello world"),
+        vec!["hello".to_string(), " world".to_string()]
+    );
+    assert_eq!(pre_tokenize_text(" hello"), vec![" hello".to_string()]);
+    assert_eq!(pre_tokenize_text(""), Vec::<String>::new());
+    assert_eq!(
+        pre_tokenize_text("hello, world!"),
+        vec![
+            "hello".to_string(),
+            ",".to_string(),
+            " world".to_string(),
+            "!".to_string(),
+        ]
+    );
+    assert_eq!(
+        pre_tokenize_text("abc123"),
+        vec!["abc".to_string(), "123".to_string()]
+    );
+    assert_eq!(
+        pre_tokenize_text("hi  there"),
+        vec!["hi".to_string(), "  there".to_string()]
+    );
 }
 }
