@@ -181,12 +181,54 @@ fn merge_once(
     Some(output)
 }
 
+fn pre_tokenize_text(text: &str) -> Vec<String> {
+    let mut pre_tokens = Vec::new();
+    let mut word = String::new();
+    let mut saw_space = false;
+
+    for character in text.chars() {
+        if character == ' ' {
+            if !word.is_empty() {
+                pre_tokens.push(word);
+                word = String::new();
+            }
+            saw_space = true;
+        } else {
+            if word.is_empty() && saw_space {
+                word.push('Ġ');
+                saw_space = false;
+            }
+            word.push(character);
+        }
+    }
+
+    if !word.is_empty() {
+        pre_tokens.push(word);
+    }
+
+    pre_tokens
+}
+
+fn clean_decoded_tokens(tokens: &[String]) -> String {
+    let mut res = String::new();
+
+    for token in tokens {
+        if let Some(rest) = token.strip_prefix('Ġ') {
+            res.push(' ');
+            res.push_str(rest);
+        } else {
+            res.push_str(token);
+        }
+    }
+    res
+}
+
 impl Tokenizer for Gpt2Tokenizer {
     fn encode(&self, text: &str) -> Result<Vec<usize>> {
         let mut token_ids = Vec::new();
 
-        for word in text.split_whitespace() {
-            let ids = self.encode_word(word)?;
+        for word in pre_tokenize_text(text) {
+            let ids = self.encode_word(&word)?;
             token_ids.extend(ids);
         }
 
@@ -206,7 +248,7 @@ impl Tokenizer for Gpt2Tokenizer {
             }
         }
 
-        Ok(words.join(" "))
+        Ok(clean_decoded_tokens(&words))
     }
 }
 
@@ -222,16 +264,24 @@ use super::*;
         ])
     }
 
+    fn tiny_space_vocab() -> HashMap<String, usize> {
+        HashMap::from([
+            ("hello".to_string(), 0),
+            ("Ġworld".to_string(), 1),
+        ])
+    }
+
     fn hello_world_merges() -> HashMap<(String, String), usize> {
         HashMap::from([
             (("h".to_string(), "e".to_string()), 0),
             (("he".to_string(), "l".to_string()), 1),
             (("hel".to_string(), "l".to_string()), 2),
             (("hell".to_string(), "o".to_string()), 3),
-            (("w".to_string(), "o".to_string()), 4),
-            (("wo".to_string(), "r".to_string()), 5),
-            (("wor".to_string(), "l".to_string()), 6),
-            (("worl".to_string(), "d".to_string()), 7),
+            (("Ġ".to_string(), "w".to_string()), 4),
+            (("Ġw".to_string(), "o".to_string()), 5),
+            (("Ġwo".to_string(), "r".to_string()), 6),
+            (("Ġwor".to_string(), "l".to_string()), 7),
+            (("Ġworl".to_string(), "d".to_string()), 8),
         ])
     }
 
@@ -444,8 +494,19 @@ fn encode_word_returns_token_ids_for_known_tokens() {
 }
 
 #[test]
+fn pre_tokenize_text_preserves_space_prefix_markers() {
+    assert_eq!(pre_tokenize_text("hello"), vec!["hello".to_string()]);
+    assert_eq!(
+        pre_tokenize_text("hello world"),
+        vec!["hello".to_string(), "Ġworld".to_string()]
+    );
+    assert_eq!(pre_tokenize_text(" hello"), vec!["Ġhello".to_string()]);
+    assert_eq!(pre_tokenize_text(""), Vec::<String>::new());
+}
+
+#[test]
 fn gpt2_tokenizer_encode_uses_bpe_word_tokens() {
-    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), hello_world_merges())
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_space_vocab(), hello_world_merges())
         .expect("valid vocab and merges should build tokenizer");
 
     let token_ids = tokenizer
@@ -457,12 +518,22 @@ fn gpt2_tokenizer_encode_uses_bpe_word_tokens() {
 
 #[test]
 fn gpt2_tokenizer_decode_joins_tokens_with_spaces() {
-    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), HashMap::new())
+    let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_space_vocab(), HashMap::new())
         .expect("valid vocab should build tokenizer");
 
     let text = tokenizer.decode(&[0, 1]).expect("decoding should succeed");
 
     assert_eq!(text, "hello world");
+}
+
+#[test]
+fn clean_decoded_tokens_removes_space_prefix_markers() {
+    assert_eq!(
+        clean_decoded_tokens(&["hello".to_string(), "Ġworld".to_string()]),
+        "hello world"
+    );
+    assert_eq!(clean_decoded_tokens(&["Ġhello".to_string()]), " hello");
+    assert_eq!(clean_decoded_tokens(&["hello".to_string()]), "hello");
 }
 
 #[test]
