@@ -124,7 +124,8 @@ impl Gpt2Tokenizer {
     }
 
     pub fn encode_word(&self, word: &str) -> Result<Vec<usize>> {
-        let tokens = self.tokenize_word(word);
+        let word = encode_bytes_to_unicode(word);
+        let tokens = self.tokenize_word(&word);
         let mut token_ids = Vec::new();
 
         for token in tokens {
@@ -184,22 +185,16 @@ fn merge_once(
 fn pre_tokenize_text(text: &str) -> Vec<String> {
     let mut pre_tokens = Vec::new();
     let mut word = String::new();
-    let mut saw_space = false;
 
     for character in text.chars() {
         if character == ' ' {
-            if !word.is_empty() {
+            if !word.is_empty() && !word.ends_with(' ') {
                 pre_tokens.push(word);
                 word = String::new();
             }
-            saw_space = true;
-        } else {
-            if word.is_empty() && saw_space {
-                word.push('Ġ');
-                saw_space = false;
-            }
-            word.push(character);
         }
+
+        word.push(character);
     }
 
     if !word.is_empty() {
@@ -209,18 +204,20 @@ fn pre_tokenize_text(text: &str) -> Vec<String> {
     pre_tokens
 }
 
-fn clean_decoded_tokens(tokens: &[String]) -> String {
-    let mut res = String::new();
+fn clean_decoded_tokens(tokens: &str) -> String {
+    let mapping = unicode_to_bytes();
+    let mut bytes: Vec<u8> = Vec::new();
 
-    for token in tokens {
-        if let Some(rest) = token.strip_prefix('Ġ') {
-            res.push(' ');
-            res.push_str(rest);
+    for character in tokens.chars() {
+        if let Some(&byte) = mapping.get(&character) {
+            bytes.push(byte);
         } else {
-            res.push_str(token);
+            panic!("Character {} not found in mapping", character);
         }
     }
-    res
+
+   return String::from_utf8(bytes).unwrap();
+
 }
 
 impl Tokenizer for Gpt2Tokenizer {
@@ -248,10 +245,60 @@ impl Tokenizer for Gpt2Tokenizer {
             }
         }
 
-        Ok(clean_decoded_tokens(&words))
+        Ok(clean_decoded_tokens(&words.concat()))
     }
 }
 
+fn bytes_to_unicode() -> HashMap<u8, char> {
+    let mut bytes = Vec::new();
+
+    bytes.extend(b'!'..=b'~');
+    bytes.extend(0xA1u8..=0xACu8);
+    bytes.extend(0xAEu8..=0xFFu8);
+    let mut codepoints: Vec<u32> = bytes.iter().map(|&b| b as u32).collect();
+
+    let mut next_codepoint = 256u32;
+    for byte in 0u8..=u8::MAX {
+        if !bytes.contains(&byte) {
+            bytes.push(byte);
+            codepoints.push(next_codepoint);
+            next_codepoint += 1;
+        }
+    }
+
+    let mut byte_to_char = HashMap::new();
+    for (byte, codepoint) in bytes.iter().zip(codepoints.iter()) {
+        byte_to_char.insert(*byte, std::char::from_u32(*codepoint).unwrap());
+    }
+
+    byte_to_char
+}
+
+fn unicode_to_bytes() -> HashMap<char, u8> {
+    let byte_to_char = bytes_to_unicode();
+    let mut char_to_byte = HashMap::new();
+
+    for (byte, character) in byte_to_char {
+        char_to_byte.insert(character, byte);
+    }
+
+    char_to_byte
+}
+
+fn encode_bytes_to_unicode(text: &str) -> String {
+    let byte_to_char = bytes_to_unicode();
+    let mut encoded = String::new();
+
+    for byte in text.as_bytes() {
+        if let Some(&character) = byte_to_char.get(byte) {
+            encoded.push(character);
+        } else {
+            panic!("Byte {} not found in mapping", byte);
+        }
+    }
+
+    encoded
+}
 
 #[cfg(test)]
 mod tests {
@@ -494,17 +541,6 @@ fn encode_word_returns_token_ids_for_known_tokens() {
 }
 
 #[test]
-fn pre_tokenize_text_preserves_space_prefix_markers() {
-    assert_eq!(pre_tokenize_text("hello"), vec!["hello".to_string()]);
-    assert_eq!(
-        pre_tokenize_text("hello world"),
-        vec!["hello".to_string(), "Ġworld".to_string()]
-    );
-    assert_eq!(pre_tokenize_text(" hello"), vec!["Ġhello".to_string()]);
-    assert_eq!(pre_tokenize_text(""), Vec::<String>::new());
-}
-
-#[test]
 fn gpt2_tokenizer_encode_uses_bpe_word_tokens() {
     let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_space_vocab(), hello_world_merges())
         .expect("valid vocab and merges should build tokenizer");
@@ -527,13 +563,13 @@ fn gpt2_tokenizer_decode_joins_tokens_with_spaces() {
 }
 
 #[test]
-fn clean_decoded_tokens_removes_space_prefix_markers() {
-    assert_eq!(
-        clean_decoded_tokens(&["hello".to_string(), "Ġworld".to_string()]),
-        "hello world"
-    );
-    assert_eq!(clean_decoded_tokens(&["Ġhello".to_string()]), " hello");
-    assert_eq!(clean_decoded_tokens(&["hello".to_string()]), "hello");
+fn clean_decoded_tokens_decodes_byte_unicode_text() {
+    assert_eq!(clean_decoded_tokens("helloĠworld"), "hello world");
+    assert_eq!(clean_decoded_tokens("Ġhello"), " hello");
+    assert_eq!(clean_decoded_tokens("hello"), "hello");
+
+    let encoded = encode_bytes_to_unicode("é");
+    assert_eq!(clean_decoded_tokens(&encoded), "é");
 }
 
 #[test]
@@ -558,5 +594,65 @@ fn gpt2_tokenizer_decode_rejects_out_of_bounds_token_id() {
         .expect_err("out-of-bounds token ID should fail");
 
     assert_eq!(err, MiniInferError::IndexOutOfBounds { index: 2, len: 2 });
+}
+
+#[test]
+fn bytes_to_unicode_maps_all_bytes() {
+    let mapping = bytes_to_unicode();
+
+    assert_eq!(mapping.len(), 256);
+}
+
+#[test]
+fn bytes_to_unicode_keeps_printable_ascii_bytes() {
+    let mapping = bytes_to_unicode();
+
+    assert_eq!(mapping.get(&b'!'), Some(&'!'));
+    assert_eq!(mapping.get(&b'A'), Some(&'A'));
+    assert_eq!(mapping.get(&b'~'), Some(&'~'));
+}
+
+#[test]
+fn bytes_to_unicode_maps_space_and_newline_to_gpt2_markers() {
+    let mapping = bytes_to_unicode();
+
+    assert_eq!(mapping.get(&b' '), Some(&'Ġ'));
+    assert_eq!(mapping.get(&b'\n'), Some(&'Ċ'));
+}
+
+#[test]
+fn bytes_to_unicode_outputs_unique_chars() {
+    let mapping = bytes_to_unicode();
+    let mut seen = std::collections::HashSet::new();
+
+    for character in mapping.values() {
+        assert!(seen.insert(*character));
+    }
+
+    assert_eq!(seen.len(), 256);
+}
+
+#[test]
+fn unicode_to_bytes_reverses_gpt2_markers() {
+    let mapping = unicode_to_bytes();
+
+    assert_eq!(mapping.get(&'Ġ'), Some(&b' '));
+    assert_eq!(mapping.get(&'Ċ'), Some(&b'\n'));
+    assert_eq!(mapping.get(&'A'), Some(&b'A'));
+    assert_eq!(mapping.get(&'~'), Some(&b'~'));
+}
+
+#[test]
+fn byte_unicode_maps_round_trip_all_bytes() {
+    let byte_to_char = bytes_to_unicode();
+    let char_to_byte = unicode_to_bytes();
+
+    for byte in 0u8..=u8::MAX {
+        let character = byte_to_char
+            .get(&byte)
+            .expect("every byte should map to a character");
+
+        assert_eq!(char_to_byte.get(character), Some(&byte));
+    }
 }
 }
