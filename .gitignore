@@ -11,3 +11,9 @@ Thumbs.db
 # Local environment files.
 .env
 .env.*
+
+# Large raw model artifacts should stay local.
+models/**/raw/
+models/**/*.bin
+models/**/*.h5
+models/**/*.safetensors

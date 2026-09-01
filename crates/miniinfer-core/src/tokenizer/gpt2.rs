@@ -9,6 +9,15 @@ static GPT2_PRE_TOKEN_PATTERN: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     .expect("valid GPT-2 pre-token regex")
 });
 
+static BYTE_TO_UNICODE: LazyLock<HashMap<u8, char>> = LazyLock::new(build_bytes_to_unicode);
+
+static UNICODE_TO_BYTES: LazyLock<HashMap<char, u8>> = LazyLock::new(|| {
+    BYTE_TO_UNICODE
+        .iter()
+        .map(|(&byte, &character)| (character, byte))
+        .collect()
+});
+
 #[derive(Debug)]
 pub struct Gpt2Tokenizer {
     token_to_id: HashMap<String, usize>,
@@ -248,7 +257,7 @@ impl Tokenizer for Gpt2Tokenizer {
     }
 }
 
-fn bytes_to_unicode() -> HashMap<u8, char> {
+fn build_bytes_to_unicode() -> HashMap<u8, char> {
     let mut bytes = Vec::new();
 
     bytes.extend(b'!'..=b'~');
@@ -273,15 +282,12 @@ fn bytes_to_unicode() -> HashMap<u8, char> {
     byte_to_char
 }
 
-fn unicode_to_bytes() -> HashMap<char, u8> {
-    let byte_to_char = bytes_to_unicode();
-    let mut char_to_byte = HashMap::new();
+fn bytes_to_unicode() -> &'static HashMap<u8, char> {
+    &BYTE_TO_UNICODE
+}
 
-    for (byte, character) in byte_to_char {
-        char_to_byte.insert(character, byte);
-    }
-
-    char_to_byte
+fn unicode_to_bytes() -> &'static HashMap<char, u8> {
+    &UNICODE_TO_BYTES
 }
 
 fn encode_bytes_to_unicode(text: &str) -> String {
