@@ -2,7 +2,6 @@ use crate::error::{MiniInferError, Result};
 use crate::model::loader::LoadedModel;
 use crate::sampling::greedy::GreedySampler;
 use crate::sampling::Sampler;
-use crate::tokenizer::tokenizer::{TinyTokenizer, Tokenizer};
 
 pub fn generate_greedy(
     model: &LoadedModel,
@@ -28,9 +27,7 @@ pub fn generate_greedy(
         let next_token_id = sampler.sample(&logits)?;
         token_ids.push(next_token_id);
     }
-    let tokenizer = TinyTokenizer::new(model.vocab().to_vec());
-    let decoded_text = tokenizer.decode(&token_ids)?;
-    Ok(decoded_text)
+    model.decode_tokens(&token_ids)
 }
 
 #[cfg(test)]

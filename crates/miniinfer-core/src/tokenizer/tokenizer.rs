@@ -1,4 +1,5 @@
-use crate::error::{Result, MiniInferError};
+use crate::{error::{MiniInferError, Result}, tokenizer::gpt2::Gpt2Tokenizer};
+
 pub trait Tokenizer {
     fn encode(&self, text: &str) -> Result<Vec<usize>>;
     fn decode(&self, token_ids: &[usize]) -> Result<String>;
@@ -6,6 +7,36 @@ pub trait Tokenizer {
 
 pub struct TinyTokenizer {
     vocab: Vec<String>,
+}
+
+pub enum LoadedTokenizer {
+    Gpt2(Gpt2Tokenizer),
+    Tiny(TinyTokenizer),
+}
+
+impl LoadedTokenizer {
+    pub fn vocab(&self) -> &[String] {
+        match self {
+            LoadedTokenizer::Gpt2(tokenizer) => tokenizer.vocab(),
+            LoadedTokenizer::Tiny(tokenizer) => tokenizer.vocab(),
+        }
+    }
+}
+
+impl Tokenizer for LoadedTokenizer {
+    fn encode(&self, text: &str) -> Result<Vec<usize>> {
+        match self {
+            LoadedTokenizer::Gpt2(tokenizer) => tokenizer.encode(text),
+            LoadedTokenizer::Tiny(tokenizer) => tokenizer.encode(text),
+        }
+    }
+
+    fn decode(&self, token_ids: &[usize]) -> Result<String> {
+        match self {
+            LoadedTokenizer::Gpt2(tokenizer) => tokenizer.decode(token_ids),
+            LoadedTokenizer::Tiny(tokenizer) => tokenizer.decode(token_ids),
+        }
+    }
 }
 
 impl Tokenizer for TinyTokenizer {
@@ -43,6 +74,10 @@ impl Tokenizer for TinyTokenizer {
 impl TinyTokenizer {
     pub fn new(vocab: Vec<String>) -> Self {
         Self { vocab }
+    }
+
+    pub fn vocab(&self) -> &[String] {
+        &self.vocab
     }
 }
 

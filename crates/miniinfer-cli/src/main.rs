@@ -4,7 +4,6 @@ use miniinfer_core::{
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     runtime::generation,
     tensor::Tensor,
-    tokenizer::tokenizer::{TinyTokenizer, Tokenizer},
 };
 
 fn main() -> Result<()> {
@@ -194,10 +193,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let model = load_model(model_path)?;
     model.validate()?;
     let token_ids = match (prompt, tokens) {
-        (Some(prompt), None) => {
-            let tokenizer = TinyTokenizer::new(model.vocab().to_vec());
-            tokenizer.encode(&prompt)?
-        }
+        (Some(prompt), None) => model.encode_prompt(&prompt)?,
         (None, Some(tokens)) => parse_token_ids(&tokens)?,
         (Some(_), Some(_)) => {
             eprintln!("Use either --prompt or --tokens, not both");

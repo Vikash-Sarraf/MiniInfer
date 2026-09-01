@@ -3,7 +3,10 @@ use std::{fs::File, path::Path};
 use serde::Deserialize;
 
 use crate::{
-    error::{MiniInferError, Result}, model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights}}, tensor::Tensor,
+    error::{MiniInferError, Result},
+    model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights}},
+    tensor::Tensor,
+    tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
 };
 
 #[derive(Deserialize)]
@@ -61,9 +64,11 @@ pub enum LoadedModel {
     Gpt2 {
         config: ModelConfig,
         weights: Gpt2Weights,
-        vocab: Vec<String>,
+        tokenizer: LoadedTokenizer,
     },
 }
+
+
 
 impl LoadedModel {
     pub fn config(&self) -> &ModelConfig {
@@ -88,7 +93,19 @@ impl LoadedModel {
 
     pub fn vocab(&self) -> &[String] {
         match self {
-            LoadedModel::Gpt2 { vocab, .. } => vocab,
+            LoadedModel::Gpt2 { tokenizer, .. } => tokenizer.vocab(),
+        }
+    }
+
+    pub fn encode_prompt(&self, prompt: &str) -> Result<Vec<usize>> {
+        match self {
+            LoadedModel::Gpt2 { tokenizer, .. } => tokenizer.encode(prompt),
+        }
+    }
+
+    pub fn decode_tokens(&self, token_ids: &[usize]) -> Result<String> {
+        match self {
+            LoadedModel::Gpt2 { tokenizer, .. } => tokenizer.decode(token_ids),
         }
     }
 }
@@ -103,19 +120,19 @@ pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
         Architecture::Gpt2 => {
             let weights = load_gpt2_weights(model_dir.join("weights.json"))?;
             weights.validate_shapes(&config)?;
-            let vocab = load_vocab(model_dir.join("vocab.json"))?;
+            let tokenizer = load_tokenizer(model_dir)?;
 
-            if vocab.len() != config.vocab_size {
+            if tokenizer.vocab().len() != config.vocab_size {
                 return Err(MiniInferError::InvalidConfig {
                     message: format!(
                         "vocab length {} must match config vocab_size {}",
-                        vocab.len(),
+                        tokenizer.vocab().len(),
                         config.vocab_size
                     ),
                 });
             }
 
-            Ok(LoadedModel::Gpt2 { config, weights, vocab })
+            Ok(LoadedModel::Gpt2 { config, weights, tokenizer })
         }
     }
 }
@@ -225,6 +242,32 @@ fn load_vocab(path: impl AsRef<Path>) -> Result<Vec<String>> {
         })?;
 
     Ok(vocab_file.tokens)
+}
+
+fn load_tokenizer(model_dir: &Path) -> Result<LoadedTokenizer> {
+    let tokenizer_dir = model_dir.join("tokenizer");
+    let gpt2_vocab_path = tokenizer_dir.join("vocab.json");
+    let gpt2_merges_path = tokenizer_dir.join("merges.txt");
+
+    if gpt2_vocab_path.exists() && gpt2_merges_path.exists() {
+        let vocab_file = std::fs::read_to_string(&gpt2_vocab_path).map_err(|error| {
+            MiniInferError::InvalidConfig {
+                message: format!("failed to read tokenizer vocab {}: {error}", gpt2_vocab_path.display()),
+            }
+        })?;
+        let vocab = serde_json::from_str(&vocab_file).map_err(|error| {
+            MiniInferError::InvalidConfig {
+                message: format!("failed to parse tokenizer vocab {}: {error}", gpt2_vocab_path.display()),
+            }
+        })?;
+        let merges = Gpt2Tokenizer::load_merges_file(gpt2_merges_path)?;
+        let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(vocab, merges)?;
+
+        return Ok(LoadedTokenizer::Gpt2(tokenizer));
+    }
+
+    let vocab = load_vocab(model_dir.join("vocab.json"))?;
+    Ok(LoadedTokenizer::Tiny(TinyTokenizer::new(vocab)))
 }
 
 #[cfg(test)]

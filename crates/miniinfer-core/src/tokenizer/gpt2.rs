@@ -107,6 +107,10 @@ impl Gpt2Tokenizer {
         self.id_to_token.get(id).map(|s| s.as_str())
     }
 
+    pub fn vocab(&self) -> &[String] {
+        &self.id_to_token
+    }
+
     pub fn merge_rank(&self, left: &str, right: &str) -> Option<usize> {
         self.merges
             .get(&(left.to_string(), right.to_string()))
