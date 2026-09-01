@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::{
     error::{MiniInferError, Result},
-    model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights}},
+    model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}},
     tensor::Tensor,
     tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
 };
@@ -222,7 +222,7 @@ pub fn load_gpt2_weights(path: impl AsRef<Path>) -> Result<Gpt2Weights> {
         blocks,
         ln_f_weight: tensor_from_file(file_weights.ln_f_weight)?,
         ln_f_bias: tensor_from_file(file_weights.ln_f_bias)?,
-        lm_head_weight: tensor_from_file(file_weights.lm_head_weight)?,
+        lm_head_weight: LMHead::Untied(tensor_from_file(file_weights.lm_head_weight)?),
     })
 }
 
@@ -316,7 +316,10 @@ mod tests {
             .expect("tiny GPT-2 weights should match config");
         assert_eq!(weights.wte.shape(), &[8, 4]);
         assert_eq!(weights.blocks.len(), 1);
-        assert_eq!(weights.lm_head_weight.shape(), &[4, 8]);
+        match &weights.lm_head_weight {
+            LMHead::Untied(weight) => assert_eq!(weight.shape(), &[4, 8]),
+            LMHead::Tied => panic!("tiny GPT-2 weights should use explicit LM head"),
+        }
     }
 
     #[test]

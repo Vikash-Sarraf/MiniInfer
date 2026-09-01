@@ -10,7 +10,12 @@ pub struct Gpt2Weights {
     pub blocks: Vec<Gpt2BlockWeights>,
     pub ln_f_weight: Tensor,
     pub ln_f_bias: Tensor,
-    pub lm_head_weight: Tensor,
+    pub lm_head_weight: LMHead,
+}
+
+pub enum LMHead {
+    Tied,
+    Untied(Tensor),
 }
 
 impl Gpt2Weights {
@@ -27,7 +32,12 @@ impl Gpt2Weights {
 
         validate_shape(&self.ln_f_weight, &[config.hidden_size])?;
         validate_shape(&self.ln_f_bias, &[config.hidden_size])?;
-        validate_shape(&self.lm_head_weight, &[config.hidden_size, config.vocab_size])?;
+        match &self.lm_head_weight {
+            LMHead::Tied => {}
+            LMHead::Untied(tensor) => {
+                validate_shape(tensor, &[config.hidden_size, config.vocab_size])?;
+            }
+        }
 
         for block in &self.blocks {
             validate_shape(&block.ln_1_weight, &[config.hidden_size])?;
@@ -102,11 +112,42 @@ impl Gpt2Weights {
 
         hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
 
-        hidden = matmul::matmul(&hidden, &self.lm_head_weight)?;
+        hidden = match &self.lm_head_weight {
+            LMHead::Tied => project_tied_lm_head(&hidden, &self.wte)?,
+            LMHead::Untied(weight) => matmul::matmul(&hidden, weight)?,
+        };
 
         Ok(hidden)
     }
 
+}
+
+fn project_tied_lm_head(hidden: &Tensor, wte: &Tensor) -> Result<Tensor> {
+    if hidden.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: hidden.shape().len(),
+        });
+    }
+
+    validate_shape(wte, &[wte.shape()[0], hidden.shape()[1]])?;
+
+    let seq_len = hidden.shape()[0];
+    let hidden_size = hidden.shape()[1];
+    let vocab_size = wte.shape()[0];
+    let mut output = Vec::with_capacity(seq_len * vocab_size);
+
+    for row in 0..seq_len {
+        for token_id in 0..vocab_size {
+            let mut sum = 0.0;
+            for hidden_col in 0..hidden_size {
+                sum += hidden.get_2d(row, hidden_col)? * wte.get_2d(token_id, hidden_col)?;
+            }
+            output.push(sum);
+        }
+    }
+
+    Tensor::new(vec![seq_len, vocab_size], output)
 }
 
 #[cfg(test)]
@@ -156,7 +197,7 @@ mod tests {
             blocks: vec![tiny_block_weights()],
             ln_f_weight: tensor(&[4]),
             ln_f_bias: tensor(&[4]),
-            lm_head_weight: tensor(&[4, 8]),
+            lm_head_weight: LMHead::Untied(tensor(&[4, 8])),
         }
     }
 
@@ -166,6 +207,36 @@ mod tests {
         let weights = tiny_weights();
 
         assert!(weights.validate_shapes(&config).is_ok());
+    }
+
+    #[test]
+    fn validates_tied_lm_head_without_explicit_weight() {
+        let config = tiny_config();
+        let weights = Gpt2Weights {
+            lm_head_weight: LMHead::Tied,
+            ..tiny_weights()
+        };
+
+        assert!(weights.validate_shapes(&config).is_ok());
+    }
+
+    #[test]
+    fn project_tied_lm_head_uses_token_embedding_rows() {
+        let hidden = Tensor::new(vec![1, 2], vec![2.0, 3.0]).expect("valid hidden tensor");
+        let wte = Tensor::new(
+            vec![3, 2],
+            vec![
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+            ],
+        )
+        .expect("valid token embeddings");
+
+        let logits = project_tied_lm_head(&hidden, &wte).expect("projection should succeed");
+
+        assert_eq!(logits.shape(), &[1, 3]);
+        assert_eq!(logits.data(), &[2.0, 3.0, 5.0]);
     }
 
     #[test]
@@ -219,7 +290,7 @@ mod tests {
             blocks: vec![tiny_block_weights()],
             ln_f_weight: tensor(&[2]),
             ln_f_bias: tensor(&[2]),
-            lm_head_weight: tensor(&[2, 2]),
+            lm_head_weight: LMHead::Untied(tensor(&[2, 2])),
         };
         let token_ids = vec![1, 0];
 
@@ -263,7 +334,7 @@ mod tests {
                 .expect("valid final layer norm weight"),
             ln_f_bias: Tensor::new(vec![4], vec![1.0, 2.0, 3.0, 4.0])
                 .expect("valid final layer norm bias"),
-            lm_head_weight: Tensor::new(
+            lm_head_weight: LMHead::Untied(Tensor::new(
                 vec![4, 8],
                 vec![
                     1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
@@ -272,7 +343,7 @@ mod tests {
                     0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
                 ],
             )
-            .expect("valid LM head weight"),
+            .expect("valid LM head weight")),
             ..tiny_weights()
         };
         let token_ids = vec![2, 1];
@@ -293,7 +364,7 @@ mod tests {
     fn forward_rejects_invalid_lm_head_shape() {
         let config = tiny_config();
         let weights = Gpt2Weights {
-            lm_head_weight: tensor(&[4, 7]),
+            lm_head_weight: LMHead::Untied(tensor(&[4, 7])),
             ..tiny_weights()
         };
 

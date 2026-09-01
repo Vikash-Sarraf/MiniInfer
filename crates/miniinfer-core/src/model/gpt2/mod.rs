@@ -2,7 +2,7 @@ pub mod block;
 pub mod weights;
 
 pub use block::Gpt2BlockWeights;
-pub use weights::Gpt2Weights;
+pub use weights::{Gpt2Weights, LMHead};
 
 use crate::{
     error::{MiniInferError, Result},
