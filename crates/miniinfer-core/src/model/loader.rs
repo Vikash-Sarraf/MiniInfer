@@ -274,6 +274,17 @@ fn load_tokenizer(model_dir: &Path) -> Result<LoadedTokenizer> {
 mod tests {
     use super::*;
 
+    fn temp_model_dir(test_name: &str) -> std::path::PathBuf {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "miniinfer-{test_name}-{}-{unique_suffix}",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn loads_tiny_gpt2_config() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2/config.json");
@@ -338,5 +349,37 @@ mod tests {
         assert_eq!(model.vocab().len(), config.vocab_size);
 
         model.validate().expect("tiny GPT-2 model should validate");
+    }
+
+    #[test]
+    fn load_tokenizer_prefers_gpt2_tokenizer_artifacts_when_present() {
+        let model_dir = temp_model_dir("gpt2-tokenizer-artifacts");
+        let tokenizer_dir = model_dir.join("tokenizer");
+        std::fs::create_dir_all(&tokenizer_dir).expect("tokenizer dir should be created");
+        std::fs::write(
+            tokenizer_dir.join("vocab.json"),
+            r#"{"hello":0,"Ġworld":1}"#,
+        )
+        .expect("GPT-2 vocab fixture should be written");
+        std::fs::write(
+            tokenizer_dir.join("merges.txt"),
+            "#version: 0.2\nh e\nhe l\nhel l\nhell o\nĠ w\nĠw o\nĠwo r\nĠwor l\nĠworl d\n",
+        )
+        .expect("GPT-2 merges fixture should be written");
+
+        let tokenizer = load_tokenizer(&model_dir).expect("GPT-2 tokenizer should load");
+
+        match tokenizer {
+            LoadedTokenizer::Gpt2(tokenizer) => {
+                assert_eq!(tokenizer.vocab().len(), 2);
+                assert_eq!(
+                    tokenizer.encode("hello world").expect("prompt should encode"),
+                    vec![0, 1]
+                );
+            }
+            LoadedTokenizer::Tiny(_) => panic!("GPT-2 tokenizer artifacts should be preferred"),
+        }
+
+        std::fs::remove_dir_all(model_dir).expect("temp model dir should be removed");
     }
 }

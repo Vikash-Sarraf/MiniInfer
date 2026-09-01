@@ -1,0 +1,10 @@
+#version: 0.2
+h e
+he l
+hel l
+hell o
+Ġ w
+Ġw o
+Ġwo r
+Ġwor l
+Ġworl d
