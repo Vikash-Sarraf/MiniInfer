@@ -23,7 +23,7 @@ impl Gpt2Tokenizer {
 
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with("#") {
+            if line.is_empty() || line.starts_with("#version") {
                 continue;
             }
 
@@ -306,6 +306,23 @@ use super::*;
         ])
     }
 
+    fn real_gpt2_tokenizer() -> Gpt2Tokenizer {
+    let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/tokenizer/gpt2-real/vocab.json");
+    let merges_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/tokenizer/gpt2-real/merges.txt");
+
+    let vocab_text = std::fs::read_to_string(vocab_path)
+        .expect("real GPT-2 vocab fixture should load");
+    let vocab = serde_json::from_str(&vocab_text)
+        .expect("real GPT-2 vocab fixture should parse");
+    let merges = Gpt2Tokenizer::load_merges_file(merges_path)
+        .expect("real GPT-2 merges fixture should parse");
+
+    Gpt2Tokenizer::from_vocab_and_merges(vocab, merges)
+        .expect("real GPT-2 tokenizer fixtures should build tokenizer")
+}
+
     fn tiny_space_vocab() -> HashMap<String, usize> {
         HashMap::from([
             ("hello".to_string(), 0),
@@ -410,15 +427,29 @@ use super::*;
     }
 
     #[test]
-    fn parse_merges_text_skips_empty_lines_and_comments() {
+    fn parse_merges_text_skips_empty_lines_and_version_header() {
         let merges = Gpt2Tokenizer::parse_merges_text(
-            "#version: 0.2\n\nh e\n\n# comment\nhe llo\n",
+            "#version: 0.2\n\nh e\n\nhe llo\n",
         )
         .expect("valid merges should parse");
 
         assert_eq!(merges.get(&("h".to_string(), "e".to_string())), Some(&0));
         assert_eq!(
             merges.get(&("he".to_string(), "llo".to_string())),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn parse_merges_text_keeps_hash_prefixed_merge_rules() {
+        let merges = Gpt2Tokenizer::parse_merges_text(
+            "#version: 0.2\n# #\n## ##\n",
+        )
+        .expect("valid hash-prefixed merges should parse");
+
+        assert_eq!(merges.get(&("#".to_string(), "#".to_string())), Some(&0));
+        assert_eq!(
+            merges.get(&("##".to_string(), "##".to_string())),
             Some(&1)
         );
     }
@@ -698,5 +729,45 @@ fn pre_tokenize_text_splits_categories_and_preserves_spaces() {
         pre_tokenize_text("hi  there"),
         vec!["hi".to_string(), " ".to_string(), " there".to_string()]
     );
+}
+
+#[test]
+fn gpt2_tokenizer_matches_reference_ids_for_common_cases() {
+    let tokenizer = real_gpt2_tokenizer();
+
+    let cases = [
+        ("The quick brown fox jumped.", vec![464, 2068, 7586, 21831, 11687, 13]),
+        ("I'm here", vec![40, 1101, 994]),
+        ("é", vec![2634]),
+        ("hi  there", vec![5303, 220, 612]),
+    ];
+
+    for (text, expected_ids) in cases {
+        assert_eq!(
+            tokenizer.encode(text).expect("encoding should succeed"),
+            expected_ids,
+            "reference ID mismatch for {text:?}"
+        );
+    }
+}
+
+#[test]
+fn gpt2_tokenizer_decodes_reference_ids_for_common_cases() {
+    let tokenizer = real_gpt2_tokenizer();
+
+    let cases = [
+        (&[464, 2068, 7586, 21831, 11687, 13][..], "The quick brown fox jumped."),
+        (&[40, 1101, 994][..], "I'm here"),
+        (&[2634][..], "é"),
+        (&[5303, 220, 612][..], "hi  there"),
+    ];
+
+    for (token_ids, expected_text) in cases {
+        assert_eq!(
+            tokenizer.decode(token_ids).expect("decoding should succeed"),
+            expected_text,
+            "reference decode mismatch for {token_ids:?}"
+        );
+    }
 }
 }
