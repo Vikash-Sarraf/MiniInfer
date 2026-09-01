@@ -1,32 +1,19 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::LazyLock};
 
 use crate::{error::{MiniInferError, Result}, tokenizer::tokenizer::Tokenizer};
+
+static GPT2_PRE_TOKEN_PATTERN: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(
+        r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
+    )
+    .expect("valid GPT-2 pre-token regex")
+});
 
 #[derive(Debug)]
 pub struct Gpt2Tokenizer {
     token_to_id: HashMap<String, usize>,
     id_to_token: Vec<String>,
     merges: HashMap<(String, String), usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CharCategory {
-    Letter,
-    Number,
-    Space,
-    Other,
-}
-
-fn classify_char(character: char) -> CharCategory {
-    if character.is_whitespace() {
-        CharCategory::Space
-    } else if character.is_alphabetic() {
-        CharCategory::Letter
-    } else if character.is_numeric() {
-        CharCategory::Number
-    } else {
-        CharCategory::Other
-    }
 }
 
 impl Gpt2Tokenizer {
@@ -203,55 +190,15 @@ fn merge_once(
 }
 
 fn pre_tokenize_text(text: &str) -> Vec<String> {
-    let mut pre_tokens = Vec::new();
-    let mut current = String::new();
-    let mut current_category: Option<CharCategory> = None;
-
-    for character in text.chars() {
-        let category = classify_char(character);
-
-        match current_category {
-            None => {
-                current.push(character);
-                current_category = Some(category);
-            }
-            Some(CharCategory::Space) => {
-                current.push(character);
-
-                if category != CharCategory::Space {
-                    current_category = Some(category);
-                }
-            }
-            Some(existing_category) if category == existing_category => {
-                current.push(character);
-            }
-            Some(_) => {
-                if category == CharCategory::Space {
-                    if !current.is_empty() {
-                        pre_tokens.push(current);
-                        current = String::new();
-                    }
-
-                    current.push(character);
-                    current_category = Some(CharCategory::Space);
-                } else {
-                    if !current.is_empty() {
-                        pre_tokens.push(current);
-                        current = String::new();
-                    }
-
-                    current.push(character);
-                    current_category = Some(category);
-                }
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        pre_tokens.push(current);
-    }
-
-    pre_tokens
+    GPT2_PRE_TOKEN_PATTERN
+        .find_iter(text)
+        .map(|match_result| {
+            match_result
+                .expect("regex match should succeed")
+                .as_str()
+                .to_string()
+        })
+        .collect()
 }
 
 fn clean_decoded_tokens(tokens: &str) -> Result<String> {
@@ -265,8 +212,7 @@ fn clean_decoded_tokens(tokens: &str) -> Result<String> {
         }
     }
 
-   Ok(String::from_utf8(bytes).unwrap())
-
+    String::from_utf8(bytes).map_err(|_| MiniInferError::InvalidInput)
 }
 
 impl Tokenizer for Gpt2Tokenizer {
@@ -634,6 +580,15 @@ fn clean_decoded_tokens_decodes_byte_unicode_text() {
 }
 
 #[test]
+fn clean_decoded_tokens_rejects_invalid_byte_unicode_text() {
+    assert_eq!(
+        clean_decoded_tokens("hello☃"),
+        Err(MiniInferError::InvalidInput)
+    );
+    assert_eq!(clean_decoded_tokens("ÿ"), Err(MiniInferError::InvalidInput));
+}
+
+#[test]
 fn gpt2_tokenizer_encode_rejects_unknown_bpe_piece() {
     let tokenizer = Gpt2Tokenizer::from_vocab_and_merges(tiny_vocab(), HashMap::new())
         .expect("valid vocab should build tokenizer");
@@ -741,7 +696,7 @@ fn pre_tokenize_text_splits_categories_and_preserves_spaces() {
     );
     assert_eq!(
         pre_tokenize_text("hi  there"),
-        vec!["hi".to_string(), "  there".to_string()]
+        vec!["hi".to_string(), " ".to_string(), " there".to_string()]
     );
 }
 }
