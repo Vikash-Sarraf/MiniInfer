@@ -52,7 +52,15 @@ struct Gpt2WeightsFile {
     blocks: Vec<Gpt2BlockWeightsFile>,
     ln_f_weight: TensorFile,
     ln_f_bias: TensorFile,
-    lm_head_weight: TensorFile,
+    lm_head: Option<LmHeadFile>,
+    lm_head_weight: Option<TensorFile>,
+}
+
+#[derive(Deserialize)]
+struct LmHeadFile {
+    #[serde(rename = "type")]
+    head_type: String,
+    weight: Option<TensorFile>,
 }
 
 #[derive(Deserialize)]
@@ -222,8 +230,33 @@ pub fn load_gpt2_weights(path: impl AsRef<Path>) -> Result<Gpt2Weights> {
         blocks,
         ln_f_weight: tensor_from_file(file_weights.ln_f_weight)?,
         ln_f_bias: tensor_from_file(file_weights.ln_f_bias)?,
-        lm_head_weight: LMHead::Untied(tensor_from_file(file_weights.lm_head_weight)?),
+        lm_head_weight: load_lm_head(file_weights.lm_head, file_weights.lm_head_weight)?,
     })
+}
+
+fn load_lm_head(
+    lm_head: Option<LmHeadFile>,
+    legacy_lm_head_weight: Option<TensorFile>,
+) -> Result<LMHead> {
+    match (lm_head, legacy_lm_head_weight) {
+        (Some(lm_head), None) if lm_head.head_type == "tied" => Ok(LMHead::Tied),
+        (Some(lm_head), None) if lm_head.head_type == "untied" => {
+            let weight = lm_head.weight.ok_or_else(|| MiniInferError::InvalidConfig {
+                message: "untied LM head must include a weight tensor".to_string(),
+            })?;
+            Ok(LMHead::Untied(tensor_from_file(weight)?))
+        }
+        (Some(lm_head), None) => Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported LM head type {}", lm_head.head_type),
+        }),
+        (None, Some(weight)) => Ok(LMHead::Untied(tensor_from_file(weight)?)),
+        (Some(_), Some(_)) => Err(MiniInferError::InvalidConfig {
+            message: "weights must specify either lm_head or lm_head_weight, not both".to_string(),
+        }),
+        (None, None) => Err(MiniInferError::InvalidConfig {
+            message: "weights must specify lm_head or lm_head_weight".to_string(),
+        }),
+    }
 }
 
 fn tensor_from_file(tensor: TensorFile) -> Result<Tensor> {
@@ -352,6 +385,42 @@ mod tests {
         assert_eq!(model.vocab().len(), config.vocab_size);
 
         model.validate().expect("tiny GPT-2 model should validate");
+    }
+
+    #[test]
+    fn load_lm_head_accepts_tied_metadata() {
+        let lm_head = load_lm_head(
+            Some(LmHeadFile {
+                head_type: "tied".to_string(),
+                weight: None,
+            }),
+            None,
+        )
+        .expect("tied LM head should load");
+
+        assert!(matches!(lm_head, LMHead::Tied));
+    }
+
+    #[test]
+    fn load_lm_head_rejects_conflicting_metadata() {
+        let err = load_lm_head(
+            Some(LmHeadFile {
+                head_type: "tied".to_string(),
+                weight: None,
+            }),
+            Some(TensorFile {
+                shape: vec![2, 2],
+                data: vec![0.0; 4],
+            }),
+        )
+        .expect_err("conflicting LM head metadata should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "weights must specify either lm_head or lm_head_weight, not both".to_string(),
+            }
+        );
     }
 
     #[test]

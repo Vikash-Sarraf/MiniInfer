@@ -13,6 +13,7 @@ pub struct Gpt2Weights {
     pub lm_head_weight: LMHead,
 }
 
+#[derive(Debug)]
 pub enum LMHead {
     Tied,
     Untied(Tensor),

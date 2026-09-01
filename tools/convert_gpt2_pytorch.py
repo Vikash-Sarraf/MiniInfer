@@ -214,7 +214,7 @@ def convert_weights(state: dict[str, Any], config: dict[str, Any]) -> dict[str, 
 		"blocks": blocks,
 		"ln_f_weight": tensor_file(tensor_for(state, "ln_f.weight", [hidden_size])),
 		"ln_f_bias": tensor_file(tensor_for(state, "ln_f.bias", [hidden_size])),
-		"lm_head_weight": tensor_file(wte.transpose(0, 1).contiguous()),
+		"lm_head": {"type": "tied"},
 	}
 
 
