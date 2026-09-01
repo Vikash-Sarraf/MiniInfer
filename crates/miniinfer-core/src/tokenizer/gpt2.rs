@@ -254,19 +254,18 @@ fn pre_tokenize_text(text: &str) -> Vec<String> {
     pre_tokens
 }
 
-fn clean_decoded_tokens(tokens: &str) -> String {
+fn clean_decoded_tokens(tokens: &str) -> Result<String> {
     let mapping = unicode_to_bytes();
     let mut bytes: Vec<u8> = Vec::new();
 
     for character in tokens.chars() {
-        if let Some(&byte) = mapping.get(&character) {
-            bytes.push(byte);
-        } else {
-            panic!("Character {} not found in mapping", character);
+        match mapping.get(&character) {
+            Some(&byte) => bytes.push(byte),
+            None => return Err(MiniInferError::InvalidInput),
         }
     }
 
-   return String::from_utf8(bytes).unwrap();
+   Ok(String::from_utf8(bytes).unwrap())
 
 }
 
@@ -295,7 +294,7 @@ impl Tokenizer for Gpt2Tokenizer {
             }
         }
 
-        Ok(clean_decoded_tokens(&words.concat()))
+        clean_decoded_tokens(&words.concat())
     }
 }
 
@@ -614,12 +613,24 @@ fn gpt2_tokenizer_decode_joins_tokens_with_spaces() {
 
 #[test]
 fn clean_decoded_tokens_decodes_byte_unicode_text() {
-    assert_eq!(clean_decoded_tokens("helloĠworld"), "hello world");
-    assert_eq!(clean_decoded_tokens("Ġhello"), " hello");
-    assert_eq!(clean_decoded_tokens("hello"), "hello");
+    assert_eq!(
+        clean_decoded_tokens("helloĠworld").expect("byte-unicode decode should succeed"),
+        "hello world"
+    );
+    assert_eq!(
+        clean_decoded_tokens("Ġhello").expect("byte-unicode decode should succeed"),
+        " hello"
+    );
+    assert_eq!(
+        clean_decoded_tokens("hello").expect("byte-unicode decode should succeed"),
+        "hello"
+    );
 
     let encoded = encode_bytes_to_unicode("é");
-    assert_eq!(clean_decoded_tokens(&encoded), "é");
+    assert_eq!(
+        clean_decoded_tokens(&encoded).expect("byte-unicode decode should succeed"),
+        "é"
+    );
 }
 
 #[test]
