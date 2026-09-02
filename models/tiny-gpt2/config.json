@@ -8,5 +8,6 @@
 	"num_layers": 1,
 	"num_heads": 2,
 	"intermediate_size": 16,
-	"layer_norm_epsilon": 0.00001
+	"layer_norm_epsilon": 0.00001,
+	"eos_token_id": 6
 }

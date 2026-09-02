@@ -14,6 +14,7 @@ pub struct ModelConfig {
     pub num_heads: usize,
     pub intermediate_size: usize,
     pub layer_norm_epsilon: f32,
+    pub eos_token_id: Option<usize>,
 }
 
 impl ModelConfig {
@@ -54,6 +55,12 @@ impl ModelConfig {
             return Err(MiniInferError::InvalidConfig { message: "Hidden size must be divisible by number of heads".to_string() });
         }
 
+        if let Some(eos_token_id) = self.eos_token_id {
+            if eos_token_id >= self.vocab_size {
+                return Err(MiniInferError::InvalidConfig { message: "eos_token_id must be less than vocab_size".to_string() });
+            }
+        }
+
         Ok(())
     }
 }
@@ -73,6 +80,7 @@ mod tests {
             num_heads: 12,
             intermediate_size: 3072,
             layer_norm_epsilon: 1e-5,
+            eos_token_id: Some(50256),
         };
 
         assert!(config.validate().is_ok());
@@ -86,6 +94,7 @@ mod tests {
             num_heads: 12,
             intermediate_size: 3072,
             layer_norm_epsilon: 1e-5,
+            eos_token_id: Some(50256),
         };
 
         assert!(invalid_config.validate().is_err());
@@ -102,6 +111,7 @@ mod tests {
             num_heads: 12,
             intermediate_size: 3072,
             layer_norm_epsilon: 1e-5,
+            eos_token_id: Some(50256),
         };
 
         assert_eq!(config.head_dim(), 64);
@@ -118,6 +128,7 @@ mod tests {
             num_heads: 12,
             intermediate_size: 3072,
             layer_norm_epsilon: 1e-5,
+            eos_token_id: Some(50256),
         };
 
         assert!(config.validate().is_err());
@@ -133,7 +144,8 @@ mod tests {
             num_layers: 12,
             num_heads: 12,
             intermediate_size: 3072,
-            layer_norm_epsilon: -1e-5, 
+            layer_norm_epsilon: -1e-5,
+            eos_token_id: Some(50256),
         };
 
         assert!(config.validate().is_err());

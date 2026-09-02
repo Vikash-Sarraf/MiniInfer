@@ -188,6 +188,7 @@ def convert_config(
 		"num_heads": int(hf_config["n_head"]),
 		"intermediate_size": intermediate_size,
 		"layer_norm_epsilon": float(hf_config["layer_norm_epsilon"]),
+		"eos_token_id": hf_config.get("eos_token_id"),
 	}
 
 

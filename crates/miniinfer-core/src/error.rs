@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MiniInferError {
     EmptyShape,
     ZeroDimension,
@@ -32,6 +32,12 @@ pub enum MiniInferError {
         actual: Vec<usize>,
     },
     InvalidInput,
+    InvalidTemperature {
+        temperature: f32,
+    },
+    InvalidTopK {
+        top_k: usize,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;

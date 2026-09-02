@@ -1,9 +1,10 @@
+use std::io::{Write, stdout};
+
 use miniinfer_core::{
     error::{MiniInferError, Result},
     model::{config::ModelConfig, loader::load_model},
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
-    runtime::generation,
-    sampling::{greedy::GreedySampler, Sampler},
+    runtime::generation::GenerationOptions,
     tensor::Tensor,
 };
 
@@ -39,6 +40,10 @@ Commands:
     bench-matmul Benchmark reference vs ndarray matmul
 Options:
     --backend ndarray|reference    Select execution backend for run/logits (default: ndarray)
+    --stream                       Print generated text token-by-token for run
+    --temperature <number>         Enable temperature sampling for run
+    --top-k <integer>              Limit temperature sampling to the highest-k logits for run
+    --seed <integer>               Seed temperature sampling for reproducible run output
     -h, --help    Show this help message"
     );
 }
@@ -154,6 +159,10 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut tokens: Option<String> = None;
     let mut backend_name: Option<String> = None;
     let mut max_new_tokens = 1;
+    let mut stream = false;
+    let mut temperature: Option<f32> = None;
+    let mut seed: Option<u64> = None;
+    let mut top_k: Option<usize> = None;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -180,18 +189,81 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
 
                 max_new_tokens = match value.parse::<usize>() {
                     Ok(value) => value,
-                        Err(_) => {
-                            eprintln!("Error: --max-new-tokens must be a positive integer");
-                            std::process::exit(1);
-                        }
-                    };
+                    Err(_) => {
+                        eprintln!("Error: --max-new-tokens must be a positive integer");
+                        std::process::exit(1);
+                    }
+                };
+            }
+            "--stream" => {
+                stream = true;
+            }
+            "--temperature" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --temperature requires a number");
+                        std::process::exit(1);
+                    }
+                };
+
+                temperature = Some(match value.parse::<f32>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("Error: --temperature must be a number");
+                        std::process::exit(1);
+                    }
+                });
+            }
+            "--seed" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --seed requires an integer");
+                        std::process::exit(1);
+                    }
+                };
+
+                seed = Some(match value.parse::<u64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("Error: --seed must be an unsigned integer");
+                        std::process::exit(1);
+                    }
+                });
+            }
+            "--top-k" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --top-k requires an integer");
+                        std::process::exit(1);
+                    }
+                };
+
+                top_k = Some(match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("Error: --top-k must be a positive integer");
+                        std::process::exit(1);
+                    }
+                });
             }
             other => {
-                eprintln!("Unknown bench-generate option: {other}");
+                eprintln!("Unknown run option: {other}");
                 std::process::exit(2);
             }
         }
     }
+    if seed.is_some() && temperature.is_none() {
+        eprintln!("Error: --seed requires --temperature");
+        std::process::exit(1);
+    }
+    if top_k.is_some() && temperature.is_none() {
+        eprintln!("Error: --top-k requires --temperature");
+        std::process::exit(1);
+    }
+
     let model_path = match model_path {
         Some(path) => path,
         None => {
@@ -217,11 +289,26 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     let backend_name = backend_name.as_deref().unwrap_or("ndarray");
     let start = std::time::Instant::now();
-    let decoded_text = with_backend(backend_name, |backend| {
-        generation::generate_greedy_with_backend(&model, &token_ids, max_new_tokens, backend)
-    })?;
+    let generation_options = GenerationOptions::new(max_new_tokens, temperature, seed, top_k)?;
+    if stream {
+        let mut stdout = stdout();
+        print!("Result: ");
+        stdout.flush().expect("failed to flush stdout");
+
+        with_backend(backend_name, |backend| {
+            generation_options.generate_streaming_with_backend(&model, &token_ids, backend, |chunk| {
+                print!("{chunk}");
+                stdout.flush().expect("failed to flush stdout");
+            })
+        })?;
+        println!();
+    } else {
+        let decoded_text = with_backend(backend_name, |backend| {
+            generation_options.generate_with_backend(&model, &token_ids, backend)
+        })?;
+        println!("Result: {}", decoded_text);
+    }
     let elapsed = start.elapsed();
-    println!("Result: {}", decoded_text);
     println!("Elapsed: {:.3}s", elapsed.as_secs_f64());
     Ok(())
 }
@@ -363,14 +450,14 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
 
                 max_new_tokens = match value.parse::<usize>() {
                     Ok(value) => value,
-                        Err(_) => {
-                            eprintln!("Error: --max-new-tokens must be a positive integer");
-                            std::process::exit(1);
-                        }
-                    };
+                    Err(_) => {
+                        eprintln!("Error: --max-new-tokens must be a positive integer");
+                        std::process::exit(1);
+                    }
+                };
             }
             other => {
-                eprintln!("Unknown run option: {other}");
+                eprintln!("Unknown bench-generate option: {other}");
                 std::process::exit(2);
             }
         }
@@ -391,7 +478,7 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
     let load_elapsed = load_start.elapsed();
 
     let encode_start = std::time::Instant::now();
-    let mut token_ids = match (prompt, tokens) {
+    let token_ids = match (prompt, tokens) {
         (Some(prompt), None) => model.encode_prompt(&prompt)?,
         (None, Some(tokens)) => parse_token_ids(&tokens)?,
         (Some(_), Some(_)) => {
@@ -417,37 +504,36 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
 
     let backend_name = backend_name.as_deref().unwrap_or("ndarray");
-    let mut sampler = GreedySampler;
     let mut first_token_elapsed = None;
+    let mut generated_tokens = 0;
+    let generation_options = GenerationOptions::new(max_new_tokens, None, None, None)?;
     let generation_start = std::time::Instant::now();
-    with_backend(backend_name, |backend| {
-        for generated_index in 0..max_new_tokens {
-            let token_start = std::time::Instant::now();
-            let logits = model.forward_last_logits_with_backend(&token_ids, backend)?;
-            let next_token_id = sampler.sample(&logits)?;
-            token_ids.push(next_token_id);
-
-            if generated_index == 0 {
-                first_token_elapsed = Some(token_start.elapsed());
-            }
-        }
-
-        Ok(())
+    let decoded_text = with_backend(backend_name, |backend| {
+        generation_options.generate_with_token_observer_and_backend(
+            &model,
+            &token_ids,
+            backend,
+            |generated_index, _| {
+                generated_tokens += 1;
+                if generated_index == 0 {
+                    first_token_elapsed = Some(generation_start.elapsed());
+                }
+            },
+        )
     })?;
     let generation_elapsed = generation_start.elapsed();
-    let decoded_text = model.decode_tokens(&token_ids)?;
-    let tokens_per_second = if max_new_tokens == 0 {
+    let tokens_per_second = if generated_tokens == 0 {
         0.0
     } else {
-        max_new_tokens as f64 / generation_elapsed.as_secs_f64()
+        generated_tokens as f64 / generation_elapsed.as_secs_f64()
     };
 
     let total_elapsed = total_start.elapsed();
 
     println!("Backend: {backend_name}");
     println!("Prompt tokens: {prompt_tokens}");
-    println!("Generated tokens: {max_new_tokens}");
-    println!("Final tokens: {}", token_ids.len());
+    println!("Generated tokens: {generated_tokens}");
+    println!("Final tokens: {}", prompt_tokens + generated_tokens);
     println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
     println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
     match first_token_elapsed {

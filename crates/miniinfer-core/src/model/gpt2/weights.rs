@@ -230,6 +230,7 @@ mod tests {
             num_heads: 2,
             intermediate_size: 16,
             layer_norm_epsilon: 1e-5,
+            eos_token_id: Some(6),
         }
     }
 

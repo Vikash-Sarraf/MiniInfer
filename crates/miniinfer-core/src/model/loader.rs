@@ -22,6 +22,7 @@ struct ModelConfigFile {
     num_heads: usize,
     intermediate_size: usize,
     layer_norm_epsilon: f32,
+    eos_token_id: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +246,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
         num_heads: file_config.num_heads,
         intermediate_size: file_config.intermediate_size,
         layer_norm_epsilon: file_config.layer_norm_epsilon,
+        eos_token_id: file_config.eos_token_id,
     };
 
     config.validate()?;
