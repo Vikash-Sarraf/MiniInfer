@@ -35,6 +35,7 @@ Commands:
     bench     Benchmark a model (not implemented yet)
     bench-matmul Benchmark reference vs ndarray matmul
 Options:
+    --backend ndarray|reference    Select execution backend for run/logits (default: ndarray)
     -h, --help    Show this help message"
     );
 }
@@ -148,6 +149,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut model_path: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut tokens: Option<String> = None;
+    let mut backend_name: Option<String> = None;
     let mut max_new_tokens = 1;
 
     while let Some(flag) = args.next() {
@@ -160,6 +162,9 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--tokens" => {
                 tokens = args.next();
+            }
+            "--backend" => {
+                backend_name = args.next();
             }
             "--max-new-tokens" => {
                 let value = match args.next() {
@@ -207,8 +212,14 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    let decoded_text = generation::generate_greedy(&model, &token_ids, max_new_tokens)?;
+    let backend_name = backend_name.as_deref().unwrap_or("ndarray");
+    let start = std::time::Instant::now();
+    let decoded_text = with_backend(backend_name, |backend| {
+        generation::generate_greedy_with_backend(&model, &token_ids, max_new_tokens, backend)
+    })?;
+    let elapsed = start.elapsed();
     println!("Result: {}", decoded_text);
+    println!("Elapsed: {:.3}s", elapsed.as_secs_f64());
     Ok(())
 }
 
@@ -217,6 +228,7 @@ fn print_logits(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut prompt: Option<String> = None;
     let mut tokens: Option<String> = None;
     let mut selected_ids: Option<String> = None;
+    let mut backend_name: Option<String> = None;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -231,6 +243,9 @@ fn print_logits(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--ids" => {
                 selected_ids = args.next();
+            }
+            "--backend" => {
+                backend_name = args.next();
             }
             other => {
                 eprintln!("Unknown logits option: {other}");
@@ -269,7 +284,8 @@ fn print_logits(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    let logits = model.forward(&token_ids)?;
+    let backend_name = backend_name.as_deref().unwrap_or("ndarray");
+    let logits = with_backend(backend_name, |backend| model.forward_with_backend(&token_ids, backend))?;
     if logits.shape().len() != 2 {
         return Err(MiniInferError::WrongRank { expected: 2, actual: logits.shape().len() });
     }
@@ -284,6 +300,24 @@ fn print_logits(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn with_backend<T>(backend_name: &str, run: impl FnOnce(&dyn OpsBackend) -> Result<T>) -> Result<T> {
+    match backend_name {
+        "ndarray" => {
+            let backend = NdArrayBackend::new();
+            run(&backend)
+        }
+        "reference" => {
+            let backend = ReferenceBackend::new();
+            run(&backend)
+        }
+        other => {
+            eprintln!("Unknown backend: {other}");
+            eprintln!("Use --backend ndarray or --backend reference");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn parse_token_ids(tokens: &str) -> Result<Vec<usize>> {

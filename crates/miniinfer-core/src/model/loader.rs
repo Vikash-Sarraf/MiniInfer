@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::{
     error::{MiniInferError, Result},
     model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}},
+    ops::backend::OpsBackend,
     tensor::Tensor,
     tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
 };
@@ -111,6 +112,32 @@ impl LoadedModel {
         match self {
             LoadedModel::Gpt2 { config, weights, .. } => {
                 weights.forward(config, token_ids)
+            }
+        }
+    }
+
+    pub fn forward_with_backend(&self, token_ids: &[usize], backend: &dyn OpsBackend) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => {
+                weights.forward_with_backend(config, token_ids, backend)
+            }
+        }
+    }
+
+    pub fn forward_last_logits(&self, token_ids: &[usize]) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => weights.forward_last_logits(config, token_ids),
+        }
+    }
+
+    pub fn forward_last_logits_with_backend(
+        &self,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => {
+                weights.forward_last_logits_with_backend(config, token_ids, backend)
             }
         }
     }

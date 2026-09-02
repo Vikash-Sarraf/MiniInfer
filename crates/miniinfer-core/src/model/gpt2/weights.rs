@@ -1,5 +1,5 @@
 use crate::{
-    error::{MiniInferError, Result}, model::config::ModelConfig, ops::{embedding, matmul, vector_add, layer_norm}, tensor::Tensor,
+    error::{MiniInferError, Result}, model::config::ModelConfig, ops::{backend::{OpsBackend, ReferenceBackend}, embedding, vector_add, layer_norm}, tensor::Tensor,
 };
 
 use super::{validate_shape, Gpt2BlockWeights};
@@ -104,23 +104,82 @@ impl Gpt2Weights {
     }
 
     pub fn forward(&self, config: &ModelConfig, token_ids: &[usize]) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.forward_with_backend(config, token_ids, &backend)
+    }
+
+    pub fn forward_with_backend(
+        &self,
+        config: &ModelConfig,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
         self.validate_shapes(config)?;
         let mut hidden = self.embed_tokens(token_ids)?;
 
         for block in &self.blocks {
-            hidden = block.forward(&hidden, config.head_dim(), config.layer_norm_epsilon)?;
+            hidden = block.forward_with_backend(&hidden, config.head_dim(), config.layer_norm_epsilon, backend)?;
         }
 
         hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
 
         hidden = match &self.lm_head_weight {
             LMHead::Tied => project_tied_lm_head(&hidden, &self.wte)?,
-            LMHead::Untied(weight) => matmul::matmul(&hidden, weight)?,
+            LMHead::Untied(weight) => backend.matmul(&hidden, weight)?,
         };
 
         Ok(hidden)
     }
 
+    pub fn forward_last_logits(&self, config: &ModelConfig, token_ids: &[usize]) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.forward_last_logits_with_backend(config, token_ids, &backend)
+    }
+
+    pub fn forward_last_logits_with_backend(
+        &self,
+        config: &ModelConfig,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        self.validate_shapes(config)?;
+
+        let mut hidden = self.embed_tokens(token_ids)?;
+
+        for block in &self.blocks {
+            hidden = block.forward_with_backend(&hidden, config.head_dim(), config.layer_norm_epsilon, backend)?;
+        }
+
+        hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
+
+        let last_hidden = last_hidden_row(&hidden)?;
+
+        match &self.lm_head_weight {
+            LMHead::Tied => project_tied_lm_head(&last_hidden, &self.wte),
+            LMHead::Untied(weight) => backend.matmul(&last_hidden, weight),
+        }
+    }
+}
+
+fn last_hidden_row(hidden: &Tensor) -> Result<Tensor> {
+    if hidden.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: hidden.shape().len(),
+        });
+    }
+
+    let seq_len = hidden.shape()[0];
+    let hidden_size = hidden.shape()[1];
+    let last_row = seq_len - 1;
+
+    let mut data = Vec::with_capacity(hidden_size);
+
+    for col in 0..hidden_size {
+        data.push(hidden.get_2d(last_row, col)?);
+    }
+
+    Tensor::new(vec![1, hidden_size], data)
 }
 
 fn project_tied_lm_head(hidden: &Tensor, wte: &Tensor) -> Result<Tensor> {

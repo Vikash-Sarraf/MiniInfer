@@ -1,5 +1,5 @@
 use crate::{
-    error::{MiniInferError, Result}, ops::{gelu, layer_norm, matmul, softmax, vector_add}, tensor::Tensor,
+    error::{MiniInferError, Result}, ops::{backend::{OpsBackend, ReferenceBackend}, gelu, layer_norm, softmax, vector_add}, tensor::Tensor,
 };
 use super::validate_shape;
 
@@ -90,6 +90,11 @@ impl Gpt2BlockWeights {
 
 
     pub fn project_qkv(&self, hidden: &Tensor) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.project_qkv_with_backend(hidden, &backend)
+    }
+
+    pub fn project_qkv_with_backend(&self, hidden: &Tensor, backend: &dyn OpsBackend) -> Result<Tensor> {
         if hidden.shape().len() != 2 {
             return Err(MiniInferError::WrongRank {
                 expected: 2,
@@ -103,7 +108,7 @@ impl Gpt2BlockWeights {
         validate_shape(&self.c_attn_weight, &[hidden_size, 3 * hidden_size])?;
         validate_shape(&self.c_attn_bias, &[3 * hidden_size])?;
 
-        let projected = matmul::matmul(hidden, &self.c_attn_weight)?;
+        let projected = backend.matmul(hidden, &self.c_attn_weight)?;
 
         let mut output = Vec::with_capacity(seq_len * 3 * hidden_size);
 
@@ -117,8 +122,19 @@ impl Gpt2BlockWeights {
         Tensor::new(vec![seq_len, 3 * hidden_size], output)
     }
 
+    #[cfg(test)]
     fn attention_context(&self, hidden: &Tensor, head_dim: usize) -> Result<Tensor> {
-        let qkv = self.project_qkv(hidden)?;
+        let backend = ReferenceBackend::new();
+        self.attention_context_with_backend(hidden, head_dim, &backend)
+    }
+
+    fn attention_context_with_backend(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let qkv = self.project_qkv_with_backend(hidden, backend)?;
         let (query, key, value) = split_qkv(&qkv)?;
 
         let hidden_size = query.shape()[1];
@@ -148,7 +164,7 @@ impl Gpt2BlockWeights {
             let scores =
                 attention_scores(&query_heads[head_index], &key_heads[head_index], head_dim)?;
             let probabilities = causal_softmax(&scores)?;
-            let context = attention_output(&probabilities, &value_heads[head_index])?;
+            let context = attention_output_with_backend(&probabilities, &value_heads[head_index], backend)?;
             context_heads.push(context);
         }
 
@@ -161,8 +177,19 @@ impl Gpt2BlockWeights {
         head_dim: usize,
         epsilon: f32,
     ) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.apply_attention_sublayer_with_backend(hidden, head_dim, epsilon, &backend)
+    }
+
+    pub fn apply_attention_sublayer_with_backend(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        epsilon: f32,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
         let normalized = self.apply_ln_1(hidden, epsilon)?;
-        let context = self.attention_context(&normalized, head_dim)?;
+        let context = self.attention_context_with_backend(&normalized, head_dim, backend)?;
 
         if context.shape().len() != 2 {
             return Err(MiniInferError::WrongRank {
@@ -177,7 +204,7 @@ impl Gpt2BlockWeights {
         validate_shape(&self.attn_c_proj_weight, &[hidden_size, hidden_size])?;
         validate_shape(&self.attn_c_proj_bias, &[hidden_size])?;
 
-        let projected = matmul::matmul(&context, &self.attn_c_proj_weight)?;
+        let projected = backend.matmul(&context, &self.attn_c_proj_weight)?;
         let mut projected_with_bias = Vec::with_capacity(seq_len * hidden_size);
 
         for row in 0..seq_len {
@@ -194,6 +221,11 @@ impl Gpt2BlockWeights {
     }
 
     pub fn apply_mlp(&self, hidden: &Tensor) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.apply_mlp_with_backend(hidden, &backend)
+    }
+
+    pub fn apply_mlp_with_backend(&self, hidden: &Tensor, backend: &dyn OpsBackend) -> Result<Tensor> {
         if hidden.shape().len() != 2 {
             return Err(MiniInferError::WrongRank {
                 expected: 2,
@@ -212,23 +244,33 @@ impl Gpt2BlockWeights {
         validate_shape(&self.mlp_c_proj_weight, &[intermediate_size, hidden_size])?;
         validate_shape(&self.mlp_c_proj_bias, &[hidden_size])?;
 
-        let expanded = matmul::matmul(hidden, &self.c_fc_weight)?;
+        let expanded = backend.matmul(hidden, &self.c_fc_weight)?;
         let expanded_data = add_bias_rows(&expanded, &self.c_fc_bias)?;
         let expanded = Tensor::new(vec![seq_len, intermediate_size], expanded_data)?;
 
         let activated_data = gelu::gelu(expanded.data())?;
         let activated = Tensor::new(vec![seq_len, intermediate_size], activated_data)?;
 
-        let projected = matmul::matmul(&activated, &self.mlp_c_proj_weight)?;
+        let projected = backend.matmul(&activated, &self.mlp_c_proj_weight)?;
         let projected_data = add_bias_rows(&projected, &self.mlp_c_proj_bias)?;
 
         Tensor::new(vec![seq_len, hidden_size], projected_data)
     }
 
     pub fn apply_mlp_sublayer(&self, hidden: &Tensor, epsilon: f32) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.apply_mlp_sublayer_with_backend(hidden, epsilon, &backend)
+    }
+
+    pub fn apply_mlp_sublayer_with_backend(
+        &self,
+        hidden: &Tensor,
+        epsilon: f32,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
         let normalized = self.apply_ln_2(hidden, epsilon)?;
 
-        let mlp_output = self.apply_mlp(&normalized)?;
+        let mlp_output = self.apply_mlp_with_backend(&normalized, backend)?;
 
         let output = vector_add::add(hidden.data(), mlp_output.data())?;
 
@@ -236,8 +278,19 @@ impl Gpt2BlockWeights {
     }
 
     pub fn forward(&self, hidden: &Tensor, head_dim: usize, epsilon: f32) -> Result<Tensor> {
-        let x = self.apply_attention_sublayer(hidden, head_dim, epsilon)?;
-        self.apply_mlp_sublayer(&x, epsilon)
+        let backend = ReferenceBackend::new();
+        self.forward_with_backend(hidden, head_dim, epsilon, &backend)
+    }
+
+    pub fn forward_with_backend(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        epsilon: f32,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let x = self.apply_attention_sublayer_with_backend(hidden, head_dim, epsilon, backend)?;
+        self.apply_mlp_sublayer_with_backend(&x, epsilon, backend)
     }
 
 }
@@ -388,8 +441,12 @@ fn causal_softmax(scores: &Tensor) -> Result<Tensor> {
     Tensor::new(vec![rows, cols], output)
 }
 
-fn attention_output(probabilities: &Tensor, value: &Tensor) -> Result<Tensor> {
-    matmul::matmul(probabilities, value)
+fn attention_output_with_backend(
+    probabilities: &Tensor,
+    value: &Tensor,
+    backend: &dyn OpsBackend,
+) -> Result<Tensor> {
+    backend.matmul(probabilities, value)
 }
 
 fn split_heads(hidden: &Tensor, num_heads: usize) -> Result<Vec<Tensor>> {

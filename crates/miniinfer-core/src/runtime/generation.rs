@@ -1,5 +1,6 @@
 use crate::error::{MiniInferError, Result};
 use crate::model::loader::LoadedModel;
+use crate::ops::backend::{OpsBackend, ReferenceBackend};
 use crate::sampling::greedy::GreedySampler;
 use crate::sampling::Sampler;
 
@@ -7,6 +8,16 @@ pub fn generate_greedy(
     model: &LoadedModel,
     token_ids: &[usize],
     max_new_tokens: usize,
+) -> Result<String> {
+    let backend = ReferenceBackend::new();
+    generate_greedy_with_backend(model, token_ids, max_new_tokens, &backend)
+}
+
+pub fn generate_greedy_with_backend(
+    model: &LoadedModel,
+    token_ids: &[usize],
+    max_new_tokens: usize,
+    backend: &dyn OpsBackend,
 ) -> Result<String> {
     let max_positions = model.config().max_position_embeddings;
     let requested_length = token_ids.len() + max_new_tokens;
@@ -23,7 +34,7 @@ pub fn generate_greedy(
     let mut token_ids = token_ids.to_vec();
 
     for _ in 0..max_new_tokens {
-        let logits = model.forward(&token_ids)?;
+        let logits = model.forward_last_logits_with_backend(&token_ids, backend)?;
         let next_token_id = sampler.sample(&logits)?;
         token_ids.push(next_token_id);
     }
