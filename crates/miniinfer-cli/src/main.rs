@@ -3,6 +3,7 @@ use miniinfer_core::{
     model::{config::ModelConfig, loader::load_model},
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     runtime::generation,
+    sampling::{greedy::GreedySampler, Sampler},
     tensor::Tensor,
 };
 
@@ -14,6 +15,7 @@ fn main() -> Result<()> {
         Some("inspect") => inspect_model(args)?,
         Some("logits") => print_logits(args)?,
         Some("bench") => println!("miniinfer bench: not implemented yet"),
+        Some("bench-generate") => bench_generate(args)?,
         Some("bench-matmul") => bench_matmul(),
         Some("--help") | Some("-h") | None => print_help(),
         Some(cmd) => {
@@ -33,6 +35,7 @@ Commands:
     inspect   Inspect a model 
     logits    Print selected logits for debugging/parity checks
     bench     Benchmark a model (not implemented yet)
+    bench-generate Benchmark greedy generation timings
     bench-matmul Benchmark reference vs ndarray matmul
 Options:
     --backend ndarray|reference    Select execution backend for run/logits (default: ndarray)
@@ -184,7 +187,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
                     };
             }
             other => {
-                eprintln!("Unknown run option: {other}");
+                eprintln!("Unknown bench-generate option: {other}");
                 std::process::exit(2);
             }
         }
@@ -326,4 +329,134 @@ fn parse_token_ids(tokens: &str) -> Result<Vec<usize>> {
         .map(|token| token.trim().parse::<usize>())
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| MiniInferError::InvalidInput)
+}
+
+fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut model_path: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut tokens: Option<String> = None;
+    let mut backend_name: Option<String> = None;
+    let mut max_new_tokens = 1;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--model" => {
+                model_path = args.next();
+            }
+            "--prompt" => {
+                prompt = args.next();
+            }
+            "--tokens" => {
+                tokens = args.next();
+            }
+            "--backend" => {
+                backend_name = args.next();
+            }
+            "--max-new-tokens" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --max-new-tokens requires a number");
+                        std::process::exit(1);
+                    }
+                };
+
+                max_new_tokens = match value.parse::<usize>() {
+                    Ok(value) => value,
+                        Err(_) => {
+                            eprintln!("Error: --max-new-tokens must be a positive integer");
+                            std::process::exit(1);
+                        }
+                    };
+            }
+            other => {
+                eprintln!("Unknown run option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let model_path = match model_path {
+        Some(path) => path,
+        None => {
+            eprintln!("Usage: miniinfer bench-generate --model <path> (--prompt <text> | --tokens <ids>)");
+            std::process::exit(1);
+        }
+    };
+
+    let total_start = std::time::Instant::now();
+    let load_start = std::time::Instant::now();
+    let model = load_model(model_path)?;
+    model.validate()?;
+    let load_elapsed = load_start.elapsed();
+
+    let encode_start = std::time::Instant::now();
+    let mut token_ids = match (prompt, tokens) {
+        (Some(prompt), None) => model.encode_prompt(&prompt)?,
+        (None, Some(tokens)) => parse_token_ids(&tokens)?,
+        (Some(_), Some(_)) => {
+            eprintln!("Use either --prompt or --tokens, not both");
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!("Usage: miniinfer bench-generate --model <path> (--prompt <text> | --tokens <ids>)");
+            std::process::exit(1);
+        }
+    };
+    let encode_elapsed = encode_start.elapsed();
+    let prompt_tokens = token_ids.len();
+
+    let requested_length = prompt_tokens + max_new_tokens;
+    if requested_length > model.config().max_position_embeddings {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!(
+                "requested sequence length {requested_length} exceeds max_position_embeddings {}",
+                model.config().max_position_embeddings
+            ),
+        });
+    }
+
+    let backend_name = backend_name.as_deref().unwrap_or("ndarray");
+    let mut sampler = GreedySampler;
+    let mut first_token_elapsed = None;
+    let generation_start = std::time::Instant::now();
+    with_backend(backend_name, |backend| {
+        for generated_index in 0..max_new_tokens {
+            let token_start = std::time::Instant::now();
+            let logits = model.forward_last_logits_with_backend(&token_ids, backend)?;
+            let next_token_id = sampler.sample(&logits)?;
+            token_ids.push(next_token_id);
+
+            if generated_index == 0 {
+                first_token_elapsed = Some(token_start.elapsed());
+            }
+        }
+
+        Ok(())
+    })?;
+    let generation_elapsed = generation_start.elapsed();
+    let decoded_text = model.decode_tokens(&token_ids)?;
+    let tokens_per_second = if max_new_tokens == 0 {
+        0.0
+    } else {
+        max_new_tokens as f64 / generation_elapsed.as_secs_f64()
+    };
+
+    let total_elapsed = total_start.elapsed();
+
+    println!("Backend: {backend_name}");
+    println!("Prompt tokens: {prompt_tokens}");
+    println!("Generated tokens: {max_new_tokens}");
+    println!("Final tokens: {}", token_ids.len());
+    println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
+    println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
+    match first_token_elapsed {
+        Some(elapsed) => println!("Time to first token: {:.3}s", elapsed.as_secs_f64()),
+        None => println!("Time to first token: n/a"),
+    }
+    println!("Generation time: {:.3}s", generation_elapsed.as_secs_f64());
+    println!("Tokens/sec: {:.3}", tokens_per_second);
+    println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
+    println!("Result: {}", decoded_text);
+    Ok(())
 }
