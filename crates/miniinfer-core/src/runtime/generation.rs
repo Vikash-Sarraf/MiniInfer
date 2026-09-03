@@ -11,15 +11,17 @@ pub struct GenerationOptions {
     pub temperature: Option<f32>,
     pub seed: Option<u64>,
     pub top_k: Option<usize>,
+    pub top_p: Option<f32>
 }
 
 impl GenerationOptions {
-    pub fn new(max_new_tokens: usize, temperature: Option<f32>, seed: Option<u64>, top_k: Option<usize>) -> Result<Self> {
+    pub fn new(max_new_tokens: usize, temperature: Option<f32>, seed: Option<u64>, top_k: Option<usize>, top_p: Option<f32>) -> Result<Self> {
         let options = GenerationOptions {
             max_new_tokens,
             temperature,
             seed,
             top_k,
+            top_p
         };
         options.validate()?;
         Ok(options)
@@ -37,6 +39,13 @@ impl GenerationOptions {
                 return Err(MiniInferError::InvalidTopK { top_k });
             }
         }
+
+        if let Some(top_p) = self.top_p {
+            if !top_p.is_finite() || top_p <= 0.0 || top_p > 1.0 {
+                return Err(MiniInferError::InvalidTopP { top_p });
+            }
+        }
+
         Ok(())
     }
 
@@ -101,7 +110,7 @@ impl GenerationOptions {
     fn create_sampler(&self) -> Result<Box<dyn Sampler>> {
         match self.temperature {
             Some(temperature) => {
-                let sampler = TemperatureSampler::with_options(temperature, self.seed, self.top_k)?;
+                let sampler = TemperatureSampler::with_options(temperature, self.seed, self.top_k, self.top_p)?;
                 Ok(Box::new(sampler))
             }
             None => Ok(Box::new(GreedySampler)),
@@ -268,7 +277,7 @@ mod tests {
     #[test]
     fn generation_options_reject_invalid_temperature() {
         assert_eq!(
-            GenerationOptions::new(1, Some(0.0), None, None),
+            GenerationOptions::new(1, Some(0.0), None, None, None),
             Err(MiniInferError::InvalidTemperature { temperature: 0.0 })
         );
     }
@@ -276,8 +285,16 @@ mod tests {
     #[test]
     fn generation_options_reject_zero_top_k() {
         assert_eq!(
-            GenerationOptions::new(1, Some(1.0), None, Some(0)),
+            GenerationOptions::new(1, Some(1.0), None, Some(0), None),
             Err(MiniInferError::InvalidTopK { top_k: 0 })
+        );
+    }
+
+    #[test]
+    fn generation_options_reject_invalid_top_p() {
+        assert_eq!(
+            GenerationOptions::new(1, Some(1.0), None, None, Some(1.1)),
+            Err(MiniInferError::InvalidTopP { top_p: 1.1 })
         );
     }
 
@@ -285,7 +302,7 @@ mod tests {
     fn generation_options_forwards_top_k_to_temperature_sampler() {
         let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
         let model = load_model(model_dir).expect("tiny GPT-2 model should load");
-        let options = GenerationOptions::new(1, Some(1.0), Some(42), Some(1))
+        let options = GenerationOptions::new(1, Some(1.0), Some(42), Some(1), Some(0.5))
             .expect("valid options");
 
         let text = options
@@ -299,7 +316,7 @@ mod tests {
     fn generation_options_streaming_emits_prompt_without_eos_token() {
         let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
         let model = load_model(model_dir).expect("tiny GPT-2 model should load");
-        let options = GenerationOptions::new(1, None, None, None).expect("valid options");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
         let backend = ReferenceBackend::new();
         let mut chunks = Vec::new();
 

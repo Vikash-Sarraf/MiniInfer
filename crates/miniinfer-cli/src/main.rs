@@ -43,6 +43,7 @@ Options:
     --stream                       Print generated text token-by-token for run
     --temperature <number>         Enable temperature sampling for run
     --top-k <integer>              Limit temperature sampling to the highest-k logits for run
+    --top-p <number>               Limit temperature sampling to cumulative probability mass for run
     --seed <integer>               Seed temperature sampling for reproducible run output
     -h, --help    Show this help message"
     );
@@ -163,6 +164,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut temperature: Option<f32> = None;
     let mut seed: Option<u64> = None;
     let mut top_k: Option<usize> = None;
+    let mut top_p: Option<f32> = None;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -249,6 +251,23 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
                     }
                 });
             }
+            "--top-p" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --top-p requires a number");
+                        std::process::exit(1);
+                    }
+                };
+
+                top_p = Some(match value.parse::<f32>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("Error: --top-p must be a number");
+                        std::process::exit(1);
+                    }
+                });
+            }
             other => {
                 eprintln!("Unknown run option: {other}");
                 std::process::exit(2);
@@ -261,6 +280,10 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
     if top_k.is_some() && temperature.is_none() {
         eprintln!("Error: --top-k requires --temperature");
+        std::process::exit(1);
+    }
+    if top_p.is_some() && temperature.is_none() {
+        eprintln!("Error: --top-p requires --temperature");
         std::process::exit(1);
     }
 
@@ -289,7 +312,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     let backend_name = backend_name.as_deref().unwrap_or("ndarray");
     let start = std::time::Instant::now();
-    let generation_options = GenerationOptions::new(max_new_tokens, temperature, seed, top_k)?;
+    let generation_options = GenerationOptions::new(max_new_tokens, temperature, seed, top_k, top_p)?;
     if stream {
         let mut stdout = stdout();
         print!("Result: ");
@@ -506,7 +529,7 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
     let backend_name = backend_name.as_deref().unwrap_or("ndarray");
     let mut first_token_elapsed = None;
     let mut generated_tokens = 0;
-    let generation_options = GenerationOptions::new(max_new_tokens, None, None, None)?;
+    let generation_options = GenerationOptions::new(max_new_tokens, None, None, None, None)?;
     let generation_start = std::time::Instant::now();
     let decoded_text = with_backend(backend_name, |backend| {
         generation_options.generate_with_token_observer_and_backend(

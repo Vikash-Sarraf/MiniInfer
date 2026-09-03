@@ -38,6 +38,9 @@ pub enum MiniInferError {
     InvalidTopK {
         top_k: usize,
     },
+    InvalidTopP {
+        top_p: f32,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MiniInferError>;
