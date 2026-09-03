@@ -3,11 +3,7 @@ use std::{collections::HashMap, fs::File, io::{Read, Seek, SeekFrom}, path::Path
 use serde::Deserialize;
 
 use crate::{
-    error::{MiniInferError, Result},
-    model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}},
-    ops::backend::OpsBackend,
-    tensor::Tensor,
-    tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
+    error::{MiniInferError, Result}, model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}}, ops::backend::{OpsBackend, ReferenceBackend}, runtime::kv_cache::KvCache, tensor::Tensor, tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
 };
 
 #[derive(Deserialize)]
@@ -139,6 +135,32 @@ impl LoadedModel {
         match self {
             LoadedModel::Gpt2 { config, weights, .. } => {
                 weights.forward_last_logits_with_backend(config, token_ids, backend)
+            }
+        }
+    }
+
+    pub fn forward_next_token_with_cache_and_backend(
+        &self,
+        token_id: usize,
+        kv_cache: &mut KvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => {
+                weights.forward_next_token_with_cache_and_backend(config, token_id, kv_cache, backend)
+            }
+        }
+    }
+
+    pub fn forward_next_token_with_cache(
+        &self,
+        token_id: usize,
+        kv_cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => {
+                weights.forward_next_token_with_cache_and_backend(config, token_id, kv_cache, &backend)
             }
         }
     }
@@ -636,6 +658,28 @@ mod tests {
         assert_eq!(model.vocab().len(), config.vocab_size);
 
         model.validate().expect("tiny GPT-2 model should validate");
+    }
+
+    #[test]
+    fn loaded_model_forward_next_token_with_cache_returns_logits_and_updates_cache() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let config = model.config();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+        let backend = ReferenceBackend::new();
+
+        let logits = model
+            .forward_next_token_with_cache_and_backend(0, &mut cache, &backend)
+            .expect("cached forward should succeed");
+
+        assert_eq!(logits.shape(), &[1, config.vocab_size]);
+        assert_eq!(cache.current_position().expect("position should exist"), 1);
     }
 
     #[test]

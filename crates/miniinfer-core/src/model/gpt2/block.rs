@@ -1,5 +1,5 @@
 use crate::{
-    error::{MiniInferError, Result}, ops::{backend::{OpsBackend, ReferenceBackend}, gelu, layer_norm, softmax, vector_add}, tensor::Tensor,
+    error::{MiniInferError, Result}, ops::{backend::{OpsBackend, ReferenceBackend}, gelu, layer_norm, softmax, vector_add}, runtime::kv_cache::LayerKvCache, tensor::Tensor,
 };
 use super::validate_shape;
 
@@ -293,6 +293,110 @@ impl Gpt2BlockWeights {
         self.apply_mlp_sublayer_with_backend(&x, epsilon, backend)
     }
 
+    pub fn forward_with_kv_cache_and_backend(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        epsilon: f32,
+        layer_cache: &mut LayerKvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let x = self.apply_attention_sublayer_with_kv_cache_and_backend(hidden, head_dim, epsilon, layer_cache, backend)?;
+        self.apply_mlp_sublayer_with_backend(&x, epsilon, backend)
+    }
+
+    fn attention_context_with_kv_cache(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        layer_cache: &mut LayerKvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let qkv = self.project_qkv_with_backend(hidden, backend)?;
+        let (query, key, value) = split_qkv(&qkv)?;
+
+        let hidden_size = query.shape()[1];
+
+        if head_dim == 0 {
+            return Err(MiniInferError::InvalidConfig {
+                message: "head_dim must be greater than zero".to_string(),
+            });
+        }
+
+        if hidden_size % head_dim != 0 {
+            return Err(MiniInferError::InvalidConfig {
+                message: format!(
+                    "hidden_size {hidden_size} must be divisible by head_dim {head_dim}"
+                ),
+            });
+        }
+
+        let num_heads = hidden_size / head_dim;
+
+        let query_heads = split_heads(&query, num_heads)?;
+        let key_heads = split_heads(&key, num_heads)?;
+        let value_heads = split_heads(&value, num_heads)?;
+
+        layer_cache.append(&key_heads, &value_heads)?;
+
+        let mut context_heads = Vec::with_capacity(num_heads);
+
+        for head_index in 0..num_heads {
+            let cached_key = layer_cache.key_for_head(head_index)?;
+            let cached_value = layer_cache.value_for_head(head_index)?;
+
+            let context = cached_attention_output_for_head(
+                &query_heads[head_index],
+                &cached_key,
+                &cached_value,
+                head_dim,
+                backend,
+            )?;
+            context_heads.push(context);
+        }
+
+        merge_heads(&context_heads)
+    }
+
+    pub fn apply_attention_sublayer_with_kv_cache_and_backend(
+        &self,
+        hidden: &Tensor,
+        head_dim: usize,
+        epsilon: f32,
+        layer_cache: &mut LayerKvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let normalized = self.apply_ln_1(hidden, epsilon)?;
+        let context = self.attention_context_with_kv_cache(&normalized, head_dim, layer_cache, backend)?;
+
+        if context.shape().len() != 2 {
+            return Err(MiniInferError::WrongRank {
+                expected: 2,
+                actual: context.shape().len(),
+            });
+        }
+
+        let seq_len = context.shape()[0];
+        let hidden_size = context.shape()[1];
+
+        validate_shape(&self.attn_c_proj_weight, &[hidden_size, hidden_size])?;
+        validate_shape(&self.attn_c_proj_bias, &[hidden_size])?;
+
+        let projected = backend.matmul(&context, &self.attn_c_proj_weight)?;
+        let mut projected_with_bias = Vec::with_capacity(seq_len * hidden_size);
+
+        for row in 0..seq_len {
+            for col in 0..hidden_size {
+                let value = projected.get_2d(row, col)? + self.attn_c_proj_bias.get_1d(col)?;
+                projected_with_bias.push(value);
+            }
+        }
+
+        let projected = Tensor::new(vec![seq_len, hidden_size], projected_with_bias)?;
+        let output = vector_add::add(hidden.data(), projected.data())?;
+
+        Tensor::new(hidden.shape().to_vec(), output)
+    }
 }
 
 fn add_bias_rows(matrix: &Tensor, bias: &Tensor) -> Result<Vec<f32>> {
@@ -540,8 +644,44 @@ fn merge_heads(heads: &[Tensor]) -> Result<Tensor> {
     Tensor::new(vec![seq_len, hidden_size], output)
 }
 
+fn row_softmax(scores: &Tensor) -> Result<Tensor> {
+    if scores.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: scores.shape().len(),
+        });
+    }
 
+    let rows = scores.shape()[0];
+    let cols = scores.shape()[1];
 
+    let mut output = Vec::with_capacity(rows * cols);
+
+    for row in 0..rows {
+        let mut row_scores = Vec::with_capacity(cols);
+
+        for col in 0..cols {
+            row_scores.push(scores.get_2d(row, col)?);
+        }
+
+        let probabilities = softmax::softmax(&row_scores)?;
+        output.extend(probabilities);
+    }
+
+    Tensor::new(vec![rows, cols], output)
+}
+
+fn cached_attention_output_for_head(
+    query_head: &Tensor,
+    cached_key: &Tensor,
+    cached_value: &Tensor,
+    head_dim: usize,
+    backend: &dyn OpsBackend,
+) -> Result<Tensor> {
+    let scores = attention_scores(query_head, cached_key, head_dim)?;
+    let probabilities = row_softmax(&scores)?;
+    attention_output_with_backend(&probabilities, cached_value, backend)
+}
 
 #[cfg(test)]
 mod tests {
@@ -601,40 +741,40 @@ mod tests {
                 .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
         );
     }
-        #[test]
-        fn attention_context_computes_attention_per_head() {
-            let block = Gpt2BlockWeights {
-                c_attn_weight: Tensor::new(
-                    vec![4, 12],
-                    vec![
-                        0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 1.0, 2.0, 3.0,
-                        4.0, 10.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 5.0, 6.0,
-                        7.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 0.0,
-                    ],
-                )
-                .expect("valid c_attn weight"),
-                c_attn_bias: Tensor::new(vec![12], vec![0.0; 12]).expect("valid c_attn bias"),
-                ..tiny_block_weights()
-            };
-            let hidden = Tensor::new(vec![2, 4], vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-                .expect("valid hidden");
+    #[test]
+    fn attention_context_computes_attention_per_head() {
+        let block = Gpt2BlockWeights {
+            c_attn_weight: Tensor::new(
+                vec![4, 12],
+                vec![
+                    0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 1.0, 2.0, 3.0,
+                    4.0, 10.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 5.0, 6.0,
+                    7.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                ],
+            )
+            .expect("valid c_attn weight"),
+            c_attn_bias: Tensor::new(vec![12], vec![0.0; 12]).expect("valid c_attn bias"),
+            ..tiny_block_weights()
+        };
+        let hidden = Tensor::new(vec![2, 4], vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+            .expect("valid hidden");
 
-            let context = block
-                .attention_context(&hidden, 2)
-                .expect("attention context should succeed");
+        let context = block
+            .attention_context(&hidden, 2)
+            .expect("attention context should succeed");
 
-            let expected = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 7.0, 8.0];
-            assert_eq!(context.shape(), &[2, 4]);
-            assert!(
-                context
-                    .data()
-                    .iter()
-                    .zip(expected.iter())
-                    .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
-            );
-        }
+        let expected = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 7.0, 8.0];
+        assert_eq!(context.shape(), &[2, 4]);
+        assert!(
+            context
+                .data()
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
+        );
+    }
 
     #[test]
     fn apply_ln_1_rejects_non_2d_hidden() {
@@ -1030,49 +1170,179 @@ mod tests {
     }
 
     #[test]
-fn split_heads_splits_hidden_dimension_into_heads() {
-    let hidden = Tensor::new(
-        vec![2, 4],
-        vec![
-            1.0, 2.0, 3.0, 4.0,
-            5.0, 6.0, 7.0, 8.0,
-        ],
-    )
-    .expect("valid hidden");
+    fn split_heads_splits_hidden_dimension_into_heads() {
+        let hidden = Tensor::new(
+            vec![2, 4],
+            vec![
+                1.0, 2.0, 3.0, 4.0,
+                5.0, 6.0, 7.0, 8.0,
+            ],
+        )
+        .expect("valid hidden");
 
-    let heads = split_heads(&hidden, 2).expect("split heads should succeed");
+        let heads = split_heads(&hidden, 2).expect("split heads should succeed");
 
-    assert_eq!(heads.len(), 2);
+        assert_eq!(heads.len(), 2);
 
-    assert_eq!(heads[0].shape(), &[2, 2]);
-    assert_eq!(heads[0].data(), &[1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(heads[0].shape(), &[2, 2]);
+        assert_eq!(heads[0].data(), &[1.0, 2.0, 5.0, 6.0]);
 
-    assert_eq!(heads[1].shape(), &[2, 2]);
-    assert_eq!(heads[1].data(), &[3.0, 4.0, 7.0, 8.0]);
-}
+        assert_eq!(heads[1].shape(), &[2, 2]);
+        assert_eq!(heads[1].data(), &[3.0, 4.0, 7.0, 8.0]);
+    }
 
-#[test]
-fn merge_heads_merges_multiple_heads_into_hidden_dimension() {
-    let head1 = Tensor::new(
-        vec![2, 2],
-        vec![
-            1.0, 2.0,
-            3.0, 4.0,
-        ],
-    )
-    .expect("valid head1");
-    let head2 = Tensor::new(
-        vec![2, 2],
-        vec![
-            5.0, 6.0,
-            7.0, 8.0,
-        ],
-    )
-    .expect("valid head2");
+    #[test]
+    fn merge_heads_merges_multiple_heads_into_hidden_dimension() {
+        let head1 = Tensor::new(
+            vec![2, 2],
+            vec![
+                1.0, 2.0,
+                3.0, 4.0,
+            ],
+        )
+        .expect("valid head1");
+        let head2 = Tensor::new(
+            vec![2, 2],
+            vec![
+                5.0, 6.0,
+                7.0, 8.0,
+            ],
+        )
+        .expect("valid head2");
 
-    let merged = merge_heads(&[head1, head2]).expect("merge heads should succeed");
+        let merged = merge_heads(&[head1, head2]).expect("merge heads should succeed");
 
-    assert_eq!(merged.shape(), &[2, 4]);
-    assert_eq!(merged.data(), &[1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
-}
+        assert_eq!(merged.shape(), &[2, 4]);
+        assert_eq!(merged.data(), &[1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
+    }
+
+        #[test]
+    fn row_softmax_accepts_non_square_scores() {
+        let scores = Tensor::new(vec![1, 3], vec![1.0, 2.0, 3.0])
+            .expect("valid scores");
+
+        let probabilities = row_softmax(&scores).expect("row softmax should succeed");
+
+        assert_eq!(probabilities.shape(), &[1, 3]);
+
+        let sum: f32 = probabilities.data().iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        assert!(probabilities.get_2d(0, 2).unwrap() > probabilities.get_2d(0, 1).unwrap());
+        assert!(probabilities.get_2d(0, 1).unwrap() > probabilities.get_2d(0, 0).unwrap());
+    }
+
+    #[test]
+    fn row_softmax_applies_softmax_per_row() {
+        let scores = Tensor::new(
+            vec![2, 2],
+            vec![
+                1.0, 2.0,
+                3.0, 4.0,
+            ],
+        )
+        .expect("valid scores");
+
+        let probabilities = row_softmax(&scores).expect("row softmax should succeed");
+
+        assert_eq!(probabilities.shape(), &[2, 2]);
+
+        let row_0_sum = probabilities.get_2d(0, 0).unwrap()
+            + probabilities.get_2d(0, 1).unwrap();
+        let row_1_sum = probabilities.get_2d(1, 0).unwrap()
+            + probabilities.get_2d(1, 1).unwrap();
+
+        assert!((row_0_sum - 1.0).abs() < 1e-6);
+        assert!((row_1_sum - 1.0).abs() < 1e-6);
+        assert!(probabilities.get_2d(0, 1).unwrap() > probabilities.get_2d(0, 0).unwrap());
+        assert!(probabilities.get_2d(1, 1).unwrap() > probabilities.get_2d(1, 0).unwrap());
+    }
+
+    #[test]
+    fn cached_attention_output_for_head_averages_values_when_scores_tie() {
+        let backend = ReferenceBackend::new();
+
+        let query = Tensor::new(vec![1, 2], vec![0.0, 0.0]).expect("valid query");
+        let key = Tensor::new(
+            vec![2, 2],
+            vec![
+                1.0, 0.0,
+                0.0, 1.0,
+            ],
+        )
+        .expect("valid key");
+        let value = Tensor::new(
+            vec![2, 2],
+            vec![
+                10.0, 20.0,
+                30.0, 40.0,
+            ],
+        )
+        .expect("valid value");
+
+        let output = cached_attention_output_for_head(&query, &key, &value, 2, &backend)
+            .expect("cached attention should succeed");
+
+        assert_eq!(output.shape(), &[1, 2]);
+        assert_eq!(output.data(), &[20.0, 30.0]);
+    }
+
+    #[test]
+    fn attention_context_with_kv_cache_appends_keys_values_and_outputs_one_row() {
+        let block = tiny_block_weights();
+        let hidden = Tensor::new(vec![1, 4], vec![1.0, 0.0, 0.0, 1.0])
+            .expect("valid hidden");
+        let backend = ReferenceBackend::new();
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let context = block
+            .attention_context_with_kv_cache(&hidden, 2, &mut cache, &backend)
+            .expect("cached attention context should succeed");
+
+        assert_eq!(cache.seq_len(), 1);
+        assert_eq!(context.shape(), &[1, 4]);
+        assert_eq!(cache.key_for_head(0).expect("key should exist").shape(), &[1, 2]);
+        assert_eq!(cache.value_for_head(1).expect("value should exist").shape(), &[1, 2]);
+    }
+
+    #[test]
+    fn apply_attention_sublayer_with_kv_cache_outputs_one_row_and_updates_cache() {
+        let block = tiny_block_weights();
+        let hidden = Tensor::new(vec![1, 4], vec![1.0, 0.0, 0.0, 1.0])
+            .expect("valid hidden");
+        let backend = ReferenceBackend::new();
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let output = block
+            .apply_attention_sublayer_with_kv_cache_and_backend(
+                &hidden,
+                2,
+                1e-5,
+                &mut cache,
+                &backend,
+            )
+            .expect("cached attention sublayer should succeed");
+
+        assert_eq!(cache.seq_len(), 1);
+        assert_eq!(output.shape(), &[1, 4]);
+        assert_eq!(cache.key_for_head(0).expect("key should exist").shape(), &[1, 2]);
+        assert_eq!(cache.value_for_head(1).expect("value should exist").shape(), &[1, 2]);
+    }
+
+    #[test]
+    fn forward_with_kv_cache_outputs_one_row_and_updates_cache() {
+        let block = tiny_block_weights();
+        let hidden = Tensor::new(vec![1, 4], vec![1.0, 0.0, 0.0, 1.0])
+            .expect("valid hidden");
+        let backend = ReferenceBackend::new();
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let output = block
+            .forward_with_kv_cache_and_backend(&hidden, 2, 1e-5, &mut cache, &backend)
+            .expect("cached block forward should succeed");
+
+        assert_eq!(cache.seq_len(), 1);
+        assert_eq!(output.shape(), &[1, 4]);
+        assert_eq!(cache.key_for_head(0).expect("key should exist").shape(), &[1, 2]);
+        assert_eq!(cache.value_for_head(1).expect("value should exist").shape(), &[1, 2]);
+    }
 }

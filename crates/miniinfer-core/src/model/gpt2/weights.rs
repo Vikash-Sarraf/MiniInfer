@@ -1,5 +1,5 @@
 use crate::{
-    error::{MiniInferError, Result}, model::config::ModelConfig, ops::{backend::{OpsBackend, ReferenceBackend}, embedding, vector_add, layer_norm}, tensor::Tensor,
+    error::{MiniInferError, Result}, model::config::ModelConfig, ops::{backend::{OpsBackend, ReferenceBackend}, embedding, vector_add, layer_norm}, runtime::kv_cache::KvCache, tensor::Tensor,
 };
 
 use super::{validate_shape, Gpt2BlockWeights};
@@ -63,9 +63,24 @@ impl Gpt2Weights {
     }
 
     pub fn embed_tokens(&self, token_ids: &[usize]) -> Result<Tensor> {
-        let token_embeddings = embedding::embedding_lookup(&self.wte, token_ids)?;
         let position_ids: Vec<usize> = (0..token_ids.len()).collect();
-        let position_embeddings = embedding::embedding_lookup(&self.wpe, &position_ids)?;
+        self.embed_tokens_at_positions(token_ids, &position_ids)
+    }
+
+    pub fn embed_tokens_at_positions(
+        &self,
+        token_ids: &[usize],
+        position_ids: &[usize],
+    ) -> Result<Tensor> {
+        if token_ids.len() != position_ids.len() {
+            return Err(MiniInferError::LengthMismatch {
+                expected: token_ids.len(),
+                actual: position_ids.len(),
+            });
+        }
+
+        let token_embeddings = embedding::embedding_lookup(&self.wte, token_ids)?;
+        let position_embeddings = embedding::embedding_lookup(&self.wpe, position_ids)?;
 
         let hidden_data = vector_add::add(token_embeddings.data(), position_embeddings.data())?;
         Tensor::new(token_embeddings.shape().to_vec(), hidden_data)
@@ -157,6 +172,47 @@ impl Gpt2Weights {
         match &self.lm_head_weight {
             LMHead::Tied => project_tied_lm_head(&last_hidden, &self.wte),
             LMHead::Untied(weight) => backend.matmul(&last_hidden, weight),
+        }
+    }
+
+    pub fn forward_next_token_with_cache(
+        &self,
+        config: &ModelConfig,
+        token_id: usize,
+        kv_cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.forward_next_token_with_cache_and_backend(config, token_id, kv_cache, &backend)
+    }
+
+    pub fn forward_next_token_with_cache_and_backend(
+        &self,
+        config: &ModelConfig,
+        token_id: usize,
+        kv_cache: &mut KvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        self.validate_shapes(config)?;
+
+        let position_id = kv_cache.current_position()?;
+        let mut hidden = self.embed_tokens_at_positions(&[token_id], &[position_id])?;
+
+        for (layer_index, block) in self.blocks.iter().enumerate() {
+            let layer_cache = kv_cache.layer_mut(layer_index)?;
+            hidden = block.forward_with_kv_cache_and_backend(
+                &hidden,
+                config.head_dim(),
+                config.layer_norm_epsilon,
+                layer_cache,
+                backend,
+            )?;
+        }
+
+        hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
+
+        match &self.lm_head_weight {
+            LMHead::Tied => project_tied_lm_head(&hidden, &self.wte),
+            LMHead::Untied(weight) => backend.matmul(&hidden, weight),
         }
     }
 }
@@ -359,6 +415,58 @@ mod tests {
 
         assert_eq!(result.shape(), &[2, 2]);
         assert_eq!(result.data(), &[2.1, 2.2, 1.3, 1.4]);
+    }
+
+    #[test]
+    fn embed_tokens_at_positions_uses_given_position_ids() {
+        let weights = Gpt2Weights {
+            wte: Tensor::new(vec![2, 2], vec![1.0, 1.0, 10.0, 20.0])
+                .expect("valid token embedding"),
+            wpe: Tensor::new(vec![4, 2], vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.0, 2.0])
+                .expect("valid position embedding"),
+            blocks: vec![tiny_block_weights()],
+            ln_f_weight: tensor(&[2]),
+            ln_f_bias: tensor(&[2]),
+            lm_head_weight: LMHead::Untied(tensor(&[2, 2])),
+        };
+
+        let result = weights
+            .embed_tokens_at_positions(&[1], &[3])
+            .expect("embedding should succeed");
+
+        assert_eq!(result.shape(), &[1, 2]);
+        assert_eq!(result.data(), &[11.0, 22.0]);
+    }
+
+    #[test]
+    fn embed_tokens_at_positions_rejects_length_mismatch() {
+        let weights = tiny_weights();
+
+        let err = weights
+            .embed_tokens_at_positions(&[0, 1], &[0])
+            .expect_err("token and position lengths should match");
+
+        assert_eq!(err, MiniInferError::LengthMismatch { expected: 2, actual: 1 });
+    }
+
+    #[test]
+    fn forward_next_token_with_cache_returns_logits_and_updates_cache() {
+        let config = tiny_config();
+        let weights = tiny_weights();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+
+        let logits = weights
+            .forward_next_token_with_cache(&config, 0, &mut cache)
+            .expect("cached token forward should succeed");
+
+        assert_eq!(logits.shape(), &[1, config.vocab_size]);
+        assert_eq!(cache.current_position().expect("position should exist"), 1);
     }
 
     #[test]

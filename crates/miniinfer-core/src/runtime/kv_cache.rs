@@ -144,6 +144,25 @@ impl KvCache {
         self.layers.len()
     }
 
+    pub fn seq_len(&self) -> Result<usize> {
+        let first_layer = self.layer(0)?;
+        let seq_len = first_layer.seq_len();
+
+        for layer in &self.layers[1..] {
+            if layer.seq_len() != seq_len {
+                return Err(MiniInferError::InvalidConfig {
+                    message: "KV cache layers must have the same sequence length".to_string(),
+                });
+            }
+        }
+
+        Ok(seq_len)
+    }
+
+    pub fn current_position(&self) -> Result<usize> {
+        self.seq_len()
+    }
+
     pub fn layer(&self, layer_index: usize) -> Result<&LayerKvCache> {
         self.layers
             .get(layer_index)
@@ -406,6 +425,44 @@ mod tests {
             assert!(layer.keys[0].is_empty());
             assert!(layer.values[0].is_empty());
         }
+    }
+
+    #[test]
+    fn kv_cache_current_position_tracks_shared_layer_sequence_length() {
+        let mut cache = KvCache::new(2, 1, 2, 4).expect("cache should be valid");
+
+        assert_eq!(cache.current_position().expect("position should exist"), 0);
+
+        for layer_index in 0..cache.num_layers() {
+            cache
+                .layer_mut(layer_index)
+                .expect("layer should exist")
+                .append(&[row(&[1.0, 2.0])], &[row(&[3.0, 4.0])])
+                .expect("append should succeed");
+        }
+
+        assert_eq!(cache.seq_len().expect("seq len should exist"), 1);
+        assert_eq!(cache.current_position().expect("position should exist"), 1);
+    }
+
+    #[test]
+    fn kv_cache_seq_len_rejects_inconsistent_layer_lengths() {
+        let mut cache = KvCache::new(2, 1, 2, 4).expect("cache should be valid");
+
+        cache
+            .layer_mut(0)
+            .expect("layer should exist")
+            .append(&[row(&[1.0, 2.0])], &[row(&[3.0, 4.0])])
+            .expect("append should succeed");
+
+        let err = cache.seq_len().expect_err("inconsistent cache should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "KV cache layers must have the same sequence length".to_string(),
+            }
+        );
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::error::{MiniInferError, Result};
 use crate::model::loader::LoadedModel;
 use crate::ops::backend::{OpsBackend, ReferenceBackend};
+use crate::runtime::kv_cache::KvCache;
 use crate::sampling::greedy::GreedySampler;
 use crate::sampling::temperature::TemperatureSampler;
 use crate::sampling::Sampler;
@@ -63,6 +64,51 @@ impl GenerationOptions {
         self.generate_with_token_observer_and_backend(model, token_ids, backend, |_, _| {})
     }
 
+    pub fn generate_with_kv_cache(
+        &self,
+        model: &LoadedModel,
+        token_ids: &[usize],
+    ) -> Result<String> {
+        let backend = ReferenceBackend::new();
+        self.generate_with_kv_cache_and_backend(model, token_ids, &backend)
+    }
+
+    pub fn generate_with_kv_cache_and_backend(
+        &self,
+        model: &LoadedModel,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+    ) -> Result<String> {
+        self.generate_with_kv_cache_and_token_observer_and_backend(
+            model,
+            token_ids,
+            backend,
+            |_, _| {},
+        )
+    }
+
+    pub fn generate_with_kv_cache_and_token_observer_and_backend<F>(
+        &self,
+        model: &LoadedModel,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+        mut on_token: F,
+    ) -> Result<String>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.validate()?;
+        let mut sampler = self.create_sampler()?;
+        generate_with_kv_cache_and_sampler_and_observer_and_backend(
+            model,
+            token_ids,
+            self.max_new_tokens,
+            backend,
+            &mut *sampler,
+            &mut on_token,
+        )
+    }
+
     pub fn generate_with_token_observer_and_backend<F>(
         &self,
         model: &LoadedModel,
@@ -98,6 +144,28 @@ impl GenerationOptions {
         self.validate()?;
         let mut sampler = self.create_sampler()?;
         generate_streaming_with_sampler_and_backend(
+            model,
+            token_ids,
+            self.max_new_tokens,
+            backend,
+            &mut *sampler,
+            on_text,
+        )
+    }
+
+    pub fn generate_streaming_with_kv_cache_and_backend<F>(
+        &self,
+        model: &LoadedModel,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+        on_text: F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str),
+    {
+        self.validate()?;
+        let mut sampler = self.create_sampler()?;
+        generate_streaming_with_kv_cache_and_sampler_and_backend(
             model,
             token_ids,
             self.max_new_tokens,
@@ -221,6 +289,134 @@ where
     Ok(decoded_text)
 }
 
+fn generate_with_kv_cache_and_sampler_and_observer_and_backend<F>(
+    model: &LoadedModel,
+    token_ids: &[usize],
+    max_new_tokens: usize,
+    backend: &dyn OpsBackend,
+    sampler: &mut dyn Sampler,
+    on_token: &mut F,
+) -> Result<String>
+where
+    F: FnMut(usize, usize),
+{
+    validate_requested_length(model, token_ids.len(), max_new_tokens)?;
+
+    if max_new_tokens == 0 {
+        return model.decode_tokens(token_ids);
+    }
+
+    let config = model.config();
+    let mut kv_cache = KvCache::new(
+        config.num_layers,
+        config.num_heads,
+        config.head_dim(),
+        config.max_position_embeddings,
+    )?;
+
+    let mut logits = None;
+    for &token_id in token_ids {
+        logits = Some(model.forward_next_token_with_cache_and_backend(
+            token_id,
+            &mut kv_cache,
+            backend,
+        )?);
+    }
+
+    let mut logits = match logits {
+        Some(logits) => logits,
+        None => return Err(MiniInferError::EmptyInput),
+    };
+    let mut token_ids = token_ids.to_vec();
+
+    for generated_index in 0..max_new_tokens {
+        let next_token_id = sampler.sample(&logits)?;
+
+        if model.config().eos_token_id == Some(next_token_id) {
+            break;
+        }
+
+        token_ids.push(next_token_id);
+        on_token(generated_index, next_token_id);
+        logits = model.forward_next_token_with_cache_and_backend(
+            next_token_id,
+            &mut kv_cache,
+            backend,
+        )?;
+    }
+
+    model.decode_tokens(&token_ids)
+}
+
+fn generate_streaming_with_kv_cache_and_sampler_and_backend<F>(
+    model: &LoadedModel,
+    token_ids: &[usize],
+    max_new_tokens: usize,
+    backend: &dyn OpsBackend,
+    sampler: &mut dyn Sampler,
+    mut on_text: F,
+) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    validate_requested_length(model, token_ids.len(), max_new_tokens)?;
+
+    let mut token_ids = token_ids.to_vec();
+    let mut decoded_text = model.decode_tokens(&token_ids)?;
+    on_text(&decoded_text);
+
+    if max_new_tokens == 0 {
+        return Ok(decoded_text);
+    }
+
+    let config = model.config();
+    let mut kv_cache = KvCache::new(
+        config.num_layers,
+        config.num_heads,
+        config.head_dim(),
+        config.max_position_embeddings,
+    )?;
+
+    let mut logits = None;
+    for &token_id in &token_ids {
+        logits = Some(model.forward_next_token_with_cache_and_backend(
+            token_id,
+            &mut kv_cache,
+            backend,
+        )?);
+    }
+
+    let mut logits = match logits {
+        Some(logits) => logits,
+        None => return Err(MiniInferError::EmptyInput),
+    };
+
+    for _ in 0..max_new_tokens {
+        let next_token_id = sampler.sample(&logits)?;
+
+        if model.config().eos_token_id == Some(next_token_id) {
+            break;
+        }
+
+        token_ids.push(next_token_id);
+
+        let next_decoded_text = model.decode_tokens(&token_ids)?;
+        let suffix = next_decoded_text
+            .strip_prefix(&decoded_text)
+            .unwrap_or(&next_decoded_text);
+        on_text(suffix);
+        decoded_text = next_decoded_text;
+
+        logits = model.forward_next_token_with_cache_and_backend(
+            next_token_id,
+            &mut kv_cache,
+            backend,
+        )?;
+    }
+
+    Ok(decoded_text)
+}
+
 fn validate_requested_length(
     model: &LoadedModel,
     prompt_tokens: usize,
@@ -328,5 +524,103 @@ mod tests {
 
         assert_eq!(text, "hello world");
         assert_eq!(chunks.concat(), "hello world");
+    }
+
+    #[test]
+    fn generation_options_kv_cache_zero_new_tokens_returns_prompt() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(0, None, None, None, None).expect("valid options");
+
+        let text = options
+            .generate_with_kv_cache(&model, &[0, 1])
+            .expect("cached generation should succeed");
+
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn generation_options_kv_cache_rejects_empty_prompt_when_generating() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
+
+        let err = options
+            .generate_with_kv_cache(&model, &[])
+            .expect_err("cached generation needs prompt logits before sampling");
+
+        assert_eq!(err, MiniInferError::EmptyInput);
+    }
+
+    #[test]
+    fn generation_options_kv_cache_rejects_sequence_longer_than_context_window() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(7, None, None, None, None).expect("valid options");
+
+        let err = options
+            .generate_with_kv_cache(&model, &[0, 1])
+            .expect_err("generation past max_position_embeddings should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message:
+                    "requested sequence length 9 exceeds max_position_embeddings 8".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn generation_options_kv_cache_stops_before_decoding_eos_token() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
+
+        let text = options
+            .generate_with_kv_cache(&model, &[0, 1])
+            .expect("cached generation should succeed");
+
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn generation_options_kv_cache_matches_non_cached_greedy_output() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
+
+        let cached_text = options
+            .generate_with_kv_cache(&model, &[0, 1])
+            .expect("cached generation should succeed");
+        let non_cached_text = options
+            .generate(&model, &[0, 1])
+            .expect("non-cached generation should succeed");
+
+        assert_eq!(cached_text, non_cached_text);
+    }
+
+    #[test]
+    fn generation_options_streaming_kv_cache_matches_non_cached_streaming_output() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
+        let backend = ReferenceBackend::new();
+        let mut cached_chunks = Vec::new();
+        let mut non_cached_chunks = Vec::new();
+
+        let cached_text = options
+            .generate_streaming_with_kv_cache_and_backend(&model, &[0, 1], &backend, |chunk| {
+                cached_chunks.push(chunk.to_string());
+            })
+            .expect("cached streaming should succeed");
+        let non_cached_text = options
+            .generate_streaming_with_backend(&model, &[0, 1], &backend, |chunk| {
+                non_cached_chunks.push(chunk.to_string());
+            })
+            .expect("non-cached streaming should succeed");
+
+        assert_eq!(cached_text, non_cached_text);
+        assert_eq!(cached_chunks.concat(), non_cached_chunks.concat());
     }
 }

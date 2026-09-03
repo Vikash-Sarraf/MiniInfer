@@ -1,11 +1,7 @@
 use std::io::{Write, stdout};
 
 use miniinfer_core::{
-    error::{MiniInferError, Result},
-    model::{config::ModelConfig, loader::load_model},
-    ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
-    runtime::generation::GenerationOptions,
-    tensor::Tensor,
+    error::{MiniInferError, Result}, model::{config::ModelConfig, loader::{LoadedModel, load_model}}, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, runtime::{generation::GenerationOptions}, tensor::Tensor,
 };
 
 fn main() -> Result<()> {
@@ -41,6 +37,8 @@ Commands:
 Options:
     --backend ndarray|reference    Select execution backend for run/logits (default: ndarray)
     --stream                       Print generated text token-by-token for run
+    --kv-cache                     Use KV-cache decoding for run/bench-generate
+    --compare-cache                Benchmark both no-cache and KV-cache generation
     --temperature <number>         Enable temperature sampling for run
     --top-k <integer>              Limit temperature sampling to the highest-k logits for run
     --top-p <number>               Limit temperature sampling to cumulative probability mass for run
@@ -161,6 +159,7 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut backend_name: Option<String> = None;
     let mut max_new_tokens = 1;
     let mut stream = false;
+    let mut kv_cache = false;
     let mut temperature: Option<f32> = None;
     let mut seed: Option<u64> = None;
     let mut top_k: Option<usize> = None;
@@ -268,6 +267,9 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
                     }
                 });
             }
+            "--kv-cache" => {
+                kv_cache = true;
+            }
             other => {
                 eprintln!("Unknown run option: {other}");
                 std::process::exit(2);
@@ -319,16 +321,34 @@ fn run_model(mut args: impl Iterator<Item = String>) -> Result<()> {
         stdout.flush().expect("failed to flush stdout");
 
         with_backend(backend_name, |backend| {
-            generation_options.generate_streaming_with_backend(&model, &token_ids, backend, |chunk| {
-                print!("{chunk}");
-                stdout.flush().expect("failed to flush stdout");
-            })
+            if kv_cache {
+                generation_options.generate_streaming_with_kv_cache_and_backend(
+                    &model,
+                    &token_ids,
+                    backend,
+                    |chunk| {
+                        print!("{chunk}");
+                        stdout.flush().expect("failed to flush stdout");
+                    },
+                )
+            } else {
+                generation_options.generate_streaming_with_backend(&model, &token_ids, backend, |chunk| {
+                    print!("{chunk}");
+                    stdout.flush().expect("failed to flush stdout");
+                })
+            }
         })?;
         println!();
     } else {
-        let decoded_text = with_backend(backend_name, |backend| {
-            generation_options.generate_with_backend(&model, &token_ids, backend)
-        })?;
+        let decoded_text = if kv_cache {
+            with_backend(backend_name, |backend| {
+                generation_options.generate_with_kv_cache_and_backend(&model, &token_ids, backend)
+            })?
+        } else {
+            with_backend(backend_name, |backend| {
+                generation_options.generate_with_backend(&model, &token_ids, backend)
+            })?
+        };
         println!("Result: {}", decoded_text);
     }
     let elapsed = start.elapsed();
@@ -447,6 +467,8 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut tokens: Option<String> = None;
     let mut backend_name: Option<String> = None;
     let mut max_new_tokens = 1;
+    let mut kv_cache = false;
+    let mut compare_cache = false;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -479,11 +501,21 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
                     }
                 };
             }
+            "--kv-cache" => {
+                kv_cache = true;
+            }
+            "--compare-cache" => {
+                compare_cache = true;
+            }
             other => {
                 eprintln!("Unknown bench-generate option: {other}");
                 std::process::exit(2);
             }
         }
+    }
+    if kv_cache && compare_cache {
+        eprintln!("Use either --kv-cache or --compare-cache, not both");
+        std::process::exit(1);
     }
 
     let model_path = match model_path {
@@ -527,14 +559,113 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
 
     let backend_name = backend_name.as_deref().unwrap_or("ndarray");
+    if compare_cache {
+        let (no_cache_result, kv_cache_result) = with_backend(backend_name, |backend| {
+            let no_cache_result = run_generation_benchmark(
+                &model,
+                &token_ids,
+                max_new_tokens,
+                backend,
+                false,
+            )?;
+            let kv_cache_result = run_generation_benchmark(
+                &model,
+                &token_ids,
+                max_new_tokens,
+                backend,
+                true,
+            )?;
+
+            Ok((no_cache_result, kv_cache_result))
+        })?;
+
+        let total_elapsed = total_start.elapsed();
+
+        println!("Backend: {backend_name}");
+        println!("Prompt tokens: {prompt_tokens}");
+        println!("Requested tokens: {max_new_tokens}");
+        println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
+        println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
+        println!();
+        print_generation_benchmark_result("No cache", prompt_tokens, &no_cache_result);
+        println!();
+        print_generation_benchmark_result("KV cache", prompt_tokens, &kv_cache_result);
+        println!();
+        println!("Speedup:");
+        println!(
+            "Generation time: {:.3}x",
+            speedup_ratio(
+                no_cache_result.generation_elapsed.as_secs_f64(),
+                kv_cache_result.generation_elapsed.as_secs_f64(),
+            )
+        );
+        println!(
+            "Tokens/sec: {:.3}x",
+            speedup_ratio(
+                kv_cache_result.tokens_per_second(),
+                no_cache_result.tokens_per_second(),
+            )
+        );
+        println!("Outputs match: {}", no_cache_result.decoded_text == kv_cache_result.decoded_text);
+        println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
+        println!("Result: {}", kv_cache_result.decoded_text);
+    } else {
+        let result = with_backend(backend_name, |backend| {
+            run_generation_benchmark(&model, &token_ids, max_new_tokens, backend, kv_cache)
+        })?;
+        let total_elapsed = total_start.elapsed();
+
+        println!("Backend: {backend_name}");
+        println!("Cache: {}", if kv_cache { "kv" } else { "none" });
+        println!("Prompt tokens: {prompt_tokens}");
+        println!("Generated tokens: {}", result.generated_tokens);
+        println!("Final tokens: {}", prompt_tokens + result.generated_tokens);
+        println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
+        println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
+        match result.first_token_elapsed {
+            Some(elapsed) => println!("Time to first token: {:.3}s", elapsed.as_secs_f64()),
+            None => println!("Time to first token: n/a"),
+        }
+        println!("Generation time: {:.3}s", result.generation_elapsed.as_secs_f64());
+        println!("Tokens/sec: {:.3}", result.tokens_per_second());
+        println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
+        println!("Result: {}", result.decoded_text);
+    }
+    Ok(())
+}
+
+struct GenerationBenchmarkResult {
+    decoded_text: String,
+    generated_tokens: usize,
+    first_token_elapsed: Option<std::time::Duration>,
+    generation_elapsed: std::time::Duration,
+}
+
+impl GenerationBenchmarkResult {
+    fn tokens_per_second(&self) -> f64 {
+        if self.generated_tokens == 0 {
+            0.0
+        } else {
+            self.generated_tokens as f64 / self.generation_elapsed.as_secs_f64()
+        }
+    }
+}
+
+fn run_generation_benchmark(
+    model: &LoadedModel,
+    token_ids: &[usize],
+    max_new_tokens: usize,
+    backend: &dyn OpsBackend,
+    use_kv_cache: bool,
+) -> Result<GenerationBenchmarkResult> {
     let mut first_token_elapsed = None;
     let mut generated_tokens = 0;
     let generation_options = GenerationOptions::new(max_new_tokens, None, None, None, None)?;
     let generation_start = std::time::Instant::now();
-    let decoded_text = with_backend(backend_name, |backend| {
-        generation_options.generate_with_token_observer_and_backend(
-            &model,
-            &token_ids,
+    let decoded_text = if use_kv_cache {
+        generation_options.generate_with_kv_cache_and_token_observer_and_backend(
+            model,
+            token_ids,
             backend,
             |generated_index, _| {
                 generated_tokens += 1;
@@ -542,30 +673,50 @@ fn bench_generate(mut args: impl Iterator<Item = String>) -> Result<()> {
                     first_token_elapsed = Some(generation_start.elapsed());
                 }
             },
-        )
-    })?;
-    let generation_elapsed = generation_start.elapsed();
-    let tokens_per_second = if generated_tokens == 0 {
-        0.0
+        )?
     } else {
-        generated_tokens as f64 / generation_elapsed.as_secs_f64()
+        generation_options.generate_with_token_observer_and_backend(
+            model,
+            token_ids,
+            backend,
+            |generated_index, _| {
+                generated_tokens += 1;
+                if generated_index == 0 {
+                    first_token_elapsed = Some(generation_start.elapsed());
+                }
+            },
+        )?
     };
+    let generation_elapsed = generation_start.elapsed();
 
-    let total_elapsed = total_start.elapsed();
+    Ok(GenerationBenchmarkResult {
+        decoded_text,
+        generated_tokens,
+        first_token_elapsed,
+        generation_elapsed,
+    })
+}
 
-    println!("Backend: {backend_name}");
-    println!("Prompt tokens: {prompt_tokens}");
-    println!("Generated tokens: {generated_tokens}");
-    println!("Final tokens: {}", prompt_tokens + generated_tokens);
-    println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
-    println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
-    match first_token_elapsed {
+fn print_generation_benchmark_result(
+    label: &str,
+    prompt_tokens: usize,
+    result: &GenerationBenchmarkResult,
+) {
+    println!("{label}:");
+    println!("Generated tokens: {}", result.generated_tokens);
+    println!("Final tokens: {}", prompt_tokens + result.generated_tokens);
+    match result.first_token_elapsed {
         Some(elapsed) => println!("Time to first token: {:.3}s", elapsed.as_secs_f64()),
         None => println!("Time to first token: n/a"),
     }
-    println!("Generation time: {:.3}s", generation_elapsed.as_secs_f64());
-    println!("Tokens/sec: {:.3}", tokens_per_second);
-    println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
-    println!("Result: {}", decoded_text);
-    Ok(())
+    println!("Generation time: {:.3}s", result.generation_elapsed.as_secs_f64());
+    println!("Tokens/sec: {:.3}", result.tokens_per_second());
+}
+
+fn speedup_ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
 }
