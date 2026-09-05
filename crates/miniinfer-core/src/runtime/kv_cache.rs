@@ -54,6 +54,19 @@ impl LayerKvCache {
         self.max_seq_len
     }
 
+    pub fn active_bytes(&self) -> usize {
+        self.seq_len() * self.num_heads() * self.head_dim() * 2 * std::mem::size_of::<f32>()
+    }
+
+    pub fn capacity_bytes(&self) -> usize {
+        self.max_seq_len() * self.num_heads() * self.head_dim() * 2 * std::mem::size_of::<f32>()
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.keys.iter().map(|k| k.capacity()).sum::<usize>() * std::mem::size_of::<f32>()
+            + self.values.iter().map(|v| v.capacity()).sum::<usize>() * std::mem::size_of::<f32>()
+    }
+
     pub fn append(&mut self, new_keys: &[Tensor], new_values: &[Tensor]) -> Result<()> {
         if new_keys.len() != self.num_heads {
             return Err(MiniInferError::LengthMismatch { expected: self.num_heads, actual: new_keys.len() });
@@ -187,6 +200,18 @@ impl KvCache {
             layer.reset();
         }
     }
+
+    pub fn active_bytes(&self) -> usize {
+        self.layers.iter().map(LayerKvCache::active_bytes).sum()
+    }
+
+    pub fn capacity_bytes(&self) -> usize {
+        self.layers.iter().map(LayerKvCache::capacity_bytes).sum()
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.layers.iter().map(LayerKvCache::allocated_bytes).sum()
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +242,26 @@ mod tests {
         assert_eq!(cache.values.len(), 2);
         assert_eq!(cache.keys[0].capacity(), 32);
         assert_eq!(cache.values[0].capacity(), 32);
+    }
+
+    #[test]
+    fn layer_cache_reports_payload_bytes() {
+        let mut cache = LayerKvCache::new(2, 4, 8).expect("cache should be valid");
+
+        assert_eq!(cache.active_bytes(), 0);
+        assert_eq!(cache.capacity_bytes(), 512);
+        assert_eq!(cache.allocated_bytes(), 512);
+
+        cache
+            .append(
+                &[row(&[1.0, 2.0, 3.0, 4.0]), row(&[5.0, 6.0, 7.0, 8.0])],
+                &[row(&[9.0, 10.0, 11.0, 12.0]), row(&[13.0, 14.0, 15.0, 16.0])],
+            )
+            .expect("append should succeed");
+
+        assert_eq!(cache.active_bytes(), 64);
+        assert_eq!(cache.capacity_bytes(), 512);
+        assert_eq!(cache.allocated_bytes(), 512);
     }
 
     #[test]
@@ -443,6 +488,30 @@ mod tests {
 
         assert_eq!(cache.seq_len().expect("seq len should exist"), 1);
         assert_eq!(cache.current_position().expect("position should exist"), 1);
+    }
+
+    #[test]
+    fn kv_cache_reports_aggregate_payload_bytes() {
+        let mut cache = KvCache::new(2, 2, 4, 8).expect("cache should be valid");
+
+        assert_eq!(cache.active_bytes(), 0);
+        assert_eq!(cache.capacity_bytes(), 1024);
+        assert_eq!(cache.allocated_bytes(), 1024);
+
+        for layer_index in 0..cache.num_layers() {
+            cache
+                .layer_mut(layer_index)
+                .expect("layer should exist")
+                .append(
+                    &[row(&[1.0, 2.0, 3.0, 4.0]), row(&[5.0, 6.0, 7.0, 8.0])],
+                    &[row(&[9.0, 10.0, 11.0, 12.0]), row(&[13.0, 14.0, 15.0, 16.0])],
+                )
+                .expect("append should succeed");
+        }
+
+        assert_eq!(cache.active_bytes(), 128);
+        assert_eq!(cache.capacity_bytes(), 1024);
+        assert_eq!(cache.allocated_bytes(), 1024);
     }
 
     #[test]

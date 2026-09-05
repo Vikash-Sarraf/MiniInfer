@@ -15,6 +15,29 @@ pub struct GenerationOptions {
     pub top_p: Option<f32>
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvCacheGenerationReport {
+    pub decoded_text: String,
+    pub kv_cache_memory: KvCacheMemoryReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheMemoryReport {
+    pub active_bytes: usize,
+    pub allocated_bytes: usize,
+    pub capacity_bytes: usize,
+}
+
+impl KvCacheMemoryReport {
+    fn from_cache(kv_cache: &KvCache) -> Self {
+        Self {
+            active_bytes: kv_cache.active_bytes(),
+            allocated_bytes: kv_cache.allocated_bytes(),
+            capacity_bytes: kv_cache.capacity_bytes(),
+        }
+    }
+}
+
 impl GenerationOptions {
     pub fn new(max_new_tokens: usize, temperature: Option<f32>, seed: Option<u64>, top_k: Option<usize>, top_p: Option<f32>) -> Result<Self> {
         let options = GenerationOptions {
@@ -99,7 +122,30 @@ impl GenerationOptions {
     {
         self.validate()?;
         let mut sampler = self.create_sampler()?;
-        generate_with_kv_cache_and_sampler_and_observer_and_backend(
+        let report = generate_with_kv_cache_report_and_sampler_and_observer_and_backend(
+            model,
+            token_ids,
+            self.max_new_tokens,
+            backend,
+            &mut *sampler,
+            &mut on_token,
+        )?;
+        Ok(report.decoded_text)
+    }
+
+    pub fn generate_with_kv_cache_report_and_token_observer_and_backend<F>(
+        &self,
+        model: &LoadedModel,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+        mut on_token: F,
+    ) -> Result<KvCacheGenerationReport>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.validate()?;
+        let mut sampler = self.create_sampler()?;
+        generate_with_kv_cache_report_and_sampler_and_observer_and_backend(
             model,
             token_ids,
             self.max_new_tokens,
@@ -289,22 +335,18 @@ where
     Ok(decoded_text)
 }
 
-fn generate_with_kv_cache_and_sampler_and_observer_and_backend<F>(
+fn generate_with_kv_cache_report_and_sampler_and_observer_and_backend<F>(
     model: &LoadedModel,
     token_ids: &[usize],
     max_new_tokens: usize,
     backend: &dyn OpsBackend,
     sampler: &mut dyn Sampler,
     on_token: &mut F,
-) -> Result<String>
+) -> Result<KvCacheGenerationReport>
 where
     F: FnMut(usize, usize),
 {
     validate_requested_length(model, token_ids.len(), max_new_tokens)?;
-
-    if max_new_tokens == 0 {
-        return model.decode_tokens(token_ids);
-    }
 
     let config = model.config();
     let mut kv_cache = KvCache::new(
@@ -313,6 +355,13 @@ where
         config.head_dim(),
         config.max_position_embeddings,
     )?;
+
+    if max_new_tokens == 0 {
+        return Ok(KvCacheGenerationReport {
+            decoded_text: model.decode_tokens(token_ids)?,
+            kv_cache_memory: KvCacheMemoryReport::from_cache(&kv_cache),
+        });
+    }
 
     let mut logits = None;
     for &token_id in token_ids {
@@ -345,7 +394,10 @@ where
         )?;
     }
 
-    model.decode_tokens(&token_ids)
+    Ok(KvCacheGenerationReport {
+        decoded_text: model.decode_tokens(&token_ids)?,
+        kv_cache_memory: KvCacheMemoryReport::from_cache(&kv_cache),
+    })
 }
 
 fn generate_streaming_with_kv_cache_and_sampler_and_backend<F>(
@@ -598,6 +650,28 @@ mod tests {
             .expect("non-cached generation should succeed");
 
         assert_eq!(cached_text, non_cached_text);
+    }
+
+    #[test]
+    fn generation_options_kv_cache_report_includes_memory_stats() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let options = GenerationOptions::new(1, None, None, None, None).expect("valid options");
+        let backend = ReferenceBackend::new();
+
+        let report = options
+            .generate_with_kv_cache_report_and_token_observer_and_backend(
+                &model,
+                &[0, 1],
+                &backend,
+                |_, _| {},
+            )
+            .expect("cached generation report should succeed");
+
+        assert_eq!(report.decoded_text, "hello world");
+        assert_eq!(report.kv_cache_memory.active_bytes, 64);
+        assert_eq!(report.kv_cache_memory.allocated_bytes, 256);
+        assert_eq!(report.kv_cache_memory.capacity_bytes, 256);
     }
 
     #[test]

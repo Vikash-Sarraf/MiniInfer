@@ -37,17 +37,24 @@ cargo run --release -p miniinfer-cli -- bench-matmul
 
 ## KV-Cache Generation Results
 
-| Prompt | Prompt tokens | Generated tokens | Final tokens | No-cache generation | No-cache tok/s | KV-cache generation | KV-cache tok/s | Speedup | Outputs match |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `Hey I bet you're wondering how I got into this situation` | 12 | 60 | 72 | 21.400s | 2.804 | 12.195s | 4.920 | 1.755x | true |
-| `Hello world` | 2 | 30 | 32 | 6.467s | 4.639 | 4.698s | 6.385 | 1.376x | true |
+| Prompt                                                     | Prompt tokens | Generated tokens | Final tokens | No-cache generation | No-cache tok/s | KV-cache generation | KV-cache tok/s | Speedup | Outputs match |
+| ---------------------------------------------------------- | ------------: | ---------------: | -----------: | ------------------: | -------------: | ------------------: | -------------: | ------: | ------------- |
+| `Hey I bet you're wondering how I got into this situation` |            12 |               60 |           72 |             21.400s |          2.804 |             12.195s |          4.920 |  1.755x | true          |
+| `Hello world`                                              |             2 |               30 |           32 |              6.467s |          4.639 |              4.698s |          6.385 |  1.376x | true          |
+
+| Prompt                                                     | Active cache payload | Allocated cache payload | Capacity cache payload |
+| ---------------------------------------------------------- | -------------------: | ----------------------: | ---------------------: |
+| `Hey I bet you're wondering how I got into this situation` |      5,308,416 bytes |        75,497,472 bytes |       75,497,472 bytes |
+| `Hello world`                                              |      2,359,296 bytes |        75,497,472 bytes |       75,497,472 bytes |
+
+The cache memory numbers are FP32 key/value payload bytes, not whole-process heap usage. `Active` reflects the tokens currently stored in the cache, while `Allocated` and `Capacity` reflect the preallocated per-layer, per-head buffers.
 
 ## Time to First Token
 
-| Prompt | No-cache TTFT | KV-cache TTFT | Note |
-| --- | ---: | ---: | --- |
-| `Hey I bet you're wondering how I got into this situation` | 0.226s | 1.928s | KV cache currently pre-fills the prompt token by token. |
-| `Hello world` | 0.135s | 0.265s | Short prompts reduce the prefill penalty, but it is still visible. |
+| Prompt                                                     | No-cache TTFT | KV-cache TTFT | Note                                                               |
+| ---------------------------------------------------------- | ------------: | ------------: | ------------------------------------------------------------------ |
+| `Hey I bet you're wondering how I got into this situation` |        0.226s |        1.928s | KV cache currently pre-fills the prompt token by token.            |
+| `Hello world`                                              |        0.135s |        0.265s | Short prompts reduce the prefill penalty, but it is still visible. |
 
 The current KV-cache implementation improves generation throughput after prefill, but it does not yet optimize prompt prefill. This is why total generation speed improves while time to first token is slower with `--kv-cache`.
 
@@ -75,6 +82,10 @@ Final tokens: 72
 Time to first token: 1.928s
 Generation time: 12.195s
 Tokens/sec: 4.920
+KV cache memory:
+  Active: 5308416 bytes (5.062 MiB)
+  Allocated: 75497472 bytes (72.000 MiB)
+  Capacity: 75497472 bytes (72.000 MiB)
 
 Speedup:
 Generation time: 1.755x
@@ -105,6 +116,10 @@ Final tokens: 32
 Time to first token: 0.265s
 Generation time: 4.698s
 Tokens/sec: 6.385
+KV cache memory:
+  Active: 2359296 bytes (2.250 MiB)
+  Allocated: 75497472 bytes (72.000 MiB)
+  Capacity: 75497472 bytes (72.000 MiB)
 
 Speedup:
 Generation time: 1.376x
@@ -124,7 +139,7 @@ The outputs match because the comparison uses greedy decoding. Matching output i
 ## Known Benchmark Gaps
 
 - Prompt prefill and decode timing are not reported separately yet.
-- KV-cache memory usage is not reported yet.
+- KV-cache reporting currently covers FP32 key/value payload bytes, not allocator overhead or total process memory.
 - The cached attention path currently clones cached key/value buffers into tensors during readback.
 - Results are local single-run measurements, not averaged benchmark suites.
 - CPU frequency scaling, background load, and thermal state can affect these numbers.
@@ -135,7 +150,7 @@ Useful next benchmark improvements:
 
 ```text
 1. Report prefill time separately from decode time.
-2. Report KV-cache allocated bytes and active bytes.
+2. Add process-level memory measurements for allocator overhead and temporary tensors.
 3. Run averaged benchmark samples with min/median/max.
 4. Compare reference backend vs ndarray backend on generation, not only matmul.
 5. Add an int8 weight-only benchmark after quantization is implemented.

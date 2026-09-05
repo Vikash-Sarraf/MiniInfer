@@ -57,6 +57,16 @@ max_seq_len = 1024
 
 Each append adds one `[1, head_dim]` key row and one `[1, head_dim]` value row per head. Readback methods convert the flat storage back into tensors with shape `[seq_len, head_dim]`.
 
+The cache reports three payload byte counts:
+
+```text
+active_bytes    = seq_len * num_heads * head_dim * 2 key/value buffers * sizeof(f32)
+capacity_bytes  = max_seq_len * num_heads * head_dim * 2 key/value buffers * sizeof(f32)
+allocated_bytes = reserved Vec<f32> capacity for all key/value buffers * sizeof(f32)
+```
+
+For GPT-2 small, `capacity_bytes` and initial `allocated_bytes` are both `75,497,472` bytes, or `72.000 MiB`, because MiniInfer preallocates all per-layer cache buffers up to the model context length.
+
 ## Decode Attention
 
 Normal full-sequence attention computes square attention scores:
@@ -158,6 +168,9 @@ No cache:
 KV cache:
   Generation time: 12.195s
   Tokens/sec: 4.920
+  Active cache payload: 5308416 bytes (5.062 MiB)
+  Allocated cache payload: 75497472 bytes (72.000 MiB)
+  Capacity cache payload: 75497472 bytes (72.000 MiB)
 
 Speedup:
   Generation time: 1.755x
@@ -176,7 +189,7 @@ The current implementation prioritizes correctness and explainability over peak 
 
 - Prompt prefill is token-by-token through the cached decode path.
 - Cached key/value readback currently clones flat buffers into `Tensor` values.
-- KV-cache memory reporting is not yet exposed in the benchmark output.
+- KV-cache memory reporting covers key/value payload bytes, not allocator metadata, temporary tensors, model weights, tokenizer data, or total process memory.
 - `bench-generate` uses greedy decoding only, which is useful for deterministic speed comparisons.
 
 The token-by-token prefill means time to first token can be slower with KV cache for longer prompts. Decode throughput still improves because generated tokens reuse cached keys and values instead of recomputing attention over the full generated sequence.
@@ -186,9 +199,9 @@ The token-by-token prefill means time to first token can be slower with KV cache
 Possible follow-up work:
 
 ```text
-1. Add KV-cache memory estimates to benchmark output.
-2. Split prompt prefill time from decode time in benchmark output.
-3. Optimize prompt prefill by computing full prompt keys/values in one pass.
-4. Avoid cloning cached key/value buffers during attention readback.
-5. Add a markdown benchmark report with hardware details and reproducible commands.
+1. Split prompt prefill time from decode time in benchmark output.
+2. Optimize prompt prefill by computing full prompt keys/values in one pass.
+3. Avoid cloning cached key/value buffers during attention readback.
+4. Add process-level memory measurements for allocator overhead and temporary tensors.
+5. Add averaged benchmark runs with min/median/max timings.
 ```
