@@ -51,10 +51,10 @@ The cache memory numbers are FP32 key/value payload bytes, not whole-process hea
 
 ## Time to First Token
 
-| Prompt                                                     | No-cache TTFT | KV-cache TTFT | Note                                                           |
-| ---------------------------------------------------------- | ------------: | ------------: | -------------------------------------------------------------- |
-| `Hey I bet you're wondering how I got into this situation` |        0.112s |        0.387s | KV cache fills prompt keys/values in one full-prompt pass.     |
-| `Hello world`                                              |        0.085s |        0.100s | Short prompts have very little prefill work either way.        |
+| Prompt                                                     | No-cache TTFT | KV-cache TTFT | Note                                                       |
+| ---------------------------------------------------------- | ------------: | ------------: | ---------------------------------------------------------- |
+| `Hey I bet you're wondering how I got into this situation` |        0.112s |        0.387s | KV cache fills prompt keys/values in one full-prompt pass. |
+| `Hello world`                                              |        0.085s |        0.100s | Short prompts have very little prefill work either way.    |
 
 The current KV-cache implementation uses optimized full-prompt prefill, then one-token cached decode for generated tokens. KV-cache TTFT can still be higher than the no-cache first step because it fills the whole prompt cache up front, but the gap is much smaller than the earlier token-by-token prefill path.
 

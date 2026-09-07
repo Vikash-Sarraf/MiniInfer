@@ -31,6 +31,7 @@ docs/                   Design notes and benchmark reports
 
 - Rust 1.89.0 or newer compatible with the workspace toolchain.
 - Python with PyTorch installed when converting Hugging Face GPT-2 weights.
+- Python with PyTorch and Transformers installed when running Hugging Face logits parity checks.
 - Local GPT-2 source files for conversion. Large model artifacts should stay out of git.
 
 ## Build and Test
@@ -52,6 +53,16 @@ Build optimized binaries for benchmark runs:
 ```powershell
 cargo build --release
 ```
+
+## Correctness Checks
+
+Compare MiniInfer final-token logits against a local Hugging Face GPT-2 checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe tools\check_gpt2_logits_parity.py --prompt "Hello world" --top-k 10
+```
+
+The parity tool loads Hugging Face GPT-2 with PyTorch, asks MiniInfer for the same selected token logits, and reports maximum and mean absolute difference. A passing run means the tokenizer IDs, converted weights, forward pass, and LM-head projection agree with the Hugging Face reference for the checked prompt.
 
 ## Convert GPT-2
 
