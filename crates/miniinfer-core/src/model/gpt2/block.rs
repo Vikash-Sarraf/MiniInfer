@@ -311,23 +311,24 @@ impl Gpt2BlockWeights {
 
         layer_cache.append(&key_heads, &value_heads)?;
 
-        let mut context_heads = Vec::with_capacity(query_heads.len());
+        let mut context_data = Vec::with_capacity(query_heads.len() * head_dim);
 
         for (head_index, query_head) in query_heads.iter().enumerate() {
-            let cached_key = layer_cache.key_for_head(head_index)?;
-            let cached_value = layer_cache.value_for_head(head_index)?;
+            let cached_key = layer_cache.key_data_for_head(head_index)?;
+            let cached_value = layer_cache.value_data_for_head(head_index)?;
 
-            let context = cached_attention_output_for_head(
-            query_head,
-                &cached_key,
-                &cached_value,
+            let context = cached_attention_output_for_head_data(
+                query_head,
+                cached_key,
+                cached_value,
+                layer_cache.seq_len(),
                 head_dim,
                 backend,
             )?;
-            context_heads.push(context);
+            context_data.extend(context);
         }
 
-        merge_heads(&context_heads)
+        Tensor::new(vec![1, query_heads.len() * head_dim], context_data)
     }
 
     pub fn apply_attention_sublayer_with_kv_cache_and_backend(
@@ -655,6 +656,7 @@ fn merge_heads(heads: &[Tensor]) -> Result<Tensor> {
     Tensor::new(vec![seq_len, hidden_size], output)
 }
 
+#[cfg(test)]
 fn row_softmax(scores: &Tensor) -> Result<Tensor> {
     if scores.shape().len() != 2 {
         return Err(MiniInferError::WrongRank {
@@ -682,16 +684,61 @@ fn row_softmax(scores: &Tensor) -> Result<Tensor> {
     Tensor::new(vec![rows, cols], output)
 }
 
-fn cached_attention_output_for_head(
+fn cached_attention_output_for_head_data(
     query_head: &Tensor,
-    cached_key: &Tensor,
-    cached_value: &Tensor,
+    cached_key: &[f32],
+    cached_value: &[f32],
+    cached_seq_len: usize,
     head_dim: usize,
     backend: &dyn OpsBackend,
-) -> Result<Tensor> {
-    let scores = attention_scores(query_head, cached_key, head_dim)?;
-    let probabilities = row_softmax(&scores)?;
-    attention_output_with_backend(&probabilities, cached_value, backend)
+) -> Result<Vec<f32>> {
+    if query_head.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: query_head.shape().len(),
+        });
+    }
+
+    if head_dim == 0 {
+        return Err(MiniInferError::InvalidConfig {
+            message: "head_dim must be greater than zero".to_string(),
+        });
+    }
+
+    if query_head.shape() != [1, head_dim] {
+        return Err(MiniInferError::InvalidTensorShape {
+            expected: vec![1, head_dim],
+            actual: query_head.shape().to_vec(),
+        });
+    }
+
+    if cached_seq_len == 0 {
+        return Err(MiniInferError::EmptyInput);
+    }
+
+    let expected_cache_values = cached_seq_len * head_dim;
+    if cached_key.len() != expected_cache_values || cached_value.len() != expected_cache_values {
+        return Err(MiniInferError::InvalidConfig {
+            message: "cached key/value length must match cache sequence length and head dimension".to_string(),
+        });
+    }
+
+    let scale = (head_dim as f32).sqrt();
+    let query = query_head.data();
+    let mut scores = Vec::with_capacity(cached_seq_len);
+    for row in 0..cached_seq_len {
+        let key_row = &cached_key[(row * head_dim)..((row + 1) * head_dim)];
+        let mut score = 0.0;
+        for col in 0..head_dim {
+            score += query[col] * key_row[col];
+        }
+        scores.push(score / scale);
+    }
+
+    softmax::softmax_in_place(&mut scores)?;
+    let context = backend.matmul_row_by_matrix(&scores, cached_value, cached_seq_len, head_dim)?;
+
+    Ok(context)
 }
 
 #[cfg(test)]
@@ -1290,11 +1337,10 @@ mod tests {
         )
         .expect("valid value");
 
-        let output = cached_attention_output_for_head(&query, &key, &value, 2, &backend)
+        let output = cached_attention_output_for_head_data(&query, key.data(), value.data(), 2, 2, &backend)
             .expect("cached attention should succeed");
 
-        assert_eq!(output.shape(), &[1, 2]);
-        assert_eq!(output.data(), &[20.0, 30.0]);
+        assert_eq!(output, &[20.0, 30.0]);
     }
 
     #[test]

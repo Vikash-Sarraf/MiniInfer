@@ -154,7 +154,7 @@ The outputs match because the comparison uses greedy decoding. Matching output i
 ## Known Benchmark Gaps
 
 - KV-cache reporting currently covers FP32 key/value payload bytes, not allocator overhead or total process memory.
-- The cached attention path currently clones cached key/value buffers into tensors during readback.
+- Cached decode attention reads borrowed key/value cache slices directly; owned tensor readback remains for tests and inspection.
 - Results are local single-run measurements, not averaged benchmark suites.
 - CPU frequency scaling, background load, and thermal state can affect these numbers.
 

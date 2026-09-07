@@ -106,6 +106,18 @@ impl LayerKvCache {
         )
     }
 
+    pub fn key_data_for_head(&self, head: usize) -> Result<&[f32]> {
+        if head >= self.num_heads {
+            return Err(MiniInferError::IndexOutOfBounds { index: head, len: self.num_heads });
+        }
+
+        if self.seq_len == 0 {
+            return Err(MiniInferError::EmptyInput);
+        }
+
+        Ok(&self.keys[head])
+    }
+
     pub fn value_for_head(&self, head: usize) -> Result<Tensor> {
         if head >= self.num_heads {
             return Err(MiniInferError::IndexOutOfBounds { index: head, len: self.num_heads });
@@ -119,6 +131,18 @@ impl LayerKvCache {
             vec![self.seq_len, self.head_dim],
             self.values[head].clone(),
         )
+    }
+
+    pub fn value_data_for_head(&self, head: usize) -> Result<&[f32]> {
+        if head >= self.num_heads {
+            return Err(MiniInferError::IndexOutOfBounds { index: head, len: self.num_heads });
+        }
+
+        if self.seq_len == 0 {
+            return Err(MiniInferError::EmptyInput);
+        }
+
+        Ok(&self.values[head])
     }
 
     pub fn reset(&mut self) {
@@ -412,6 +436,8 @@ mod tests {
         assert_eq!(key.data(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(value.shape(), &[2, 2]);
         assert_eq!(value.data(), &[10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(cache.key_data_for_head(0).expect("key slice should exist"), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(cache.value_data_for_head(0).expect("value slice should exist"), &[10.0, 20.0, 30.0, 40.0]);
     }
 
     #[test]
@@ -657,6 +683,8 @@ mod tests {
         assert!(cache.values[0].is_empty());
         expect_empty_input(cache.key_for_head(0));
         expect_empty_input(cache.value_for_head(0));
+        assert!(matches!(cache.key_data_for_head(0), Err(MiniInferError::EmptyInput)));
+        assert!(matches!(cache.value_data_for_head(0), Err(MiniInferError::EmptyInput)));
     }
 
     #[test]

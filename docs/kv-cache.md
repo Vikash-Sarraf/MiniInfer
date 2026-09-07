@@ -55,7 +55,7 @@ head_dim = 64
 max_seq_len = 1024
 ```
 
-Each append adds one `[1, head_dim]` key row and one `[1, head_dim]` value row per head. Readback methods convert the flat storage back into tensors with shape `[seq_len, head_dim]`.
+Each append adds one `[1, head_dim]` key row and one `[1, head_dim]` value row per head. Cached decode borrows the flat per-head slices directly. Owned readback methods still convert the flat storage back into tensors with shape `[seq_len, head_dim]` for tests and inspection.
 
 Prompt prefill uses `append_many` to add all prompt key/value rows for each layer in one full-prompt pass. Decode still uses `append` because each generated token contributes one new row per head.
 
@@ -195,8 +195,8 @@ See [benchmarks.md](benchmarks.md) for the full benchmark command, environment d
 
 The current implementation prioritizes correctness and explainability over peak performance.
 
-- Prompt prefill is token-by-token through the cached decode path.
-- Cached key/value readback currently clones flat buffers into `Tensor` values.
+- Prompt prefill already fills the cache in one full-prompt pass, but it is still optimized for readability over peak throughput.
+- Cached decode attention reads borrowed key/value slices directly; owned tensor readback remains available for tests and inspection.
 - KV-cache memory reporting covers key/value payload bytes, not allocator metadata, temporary tensors, model weights, tokenizer data, or total process memory.
 - `bench-generate` uses greedy decoding only, which is useful for deterministic speed comparisons.
 
@@ -207,9 +207,8 @@ KV-cache time to first token can still be higher than the no-cache first step be
 Possible follow-up work:
 
 ```text
-1. Avoid cloning cached key/value buffers during attention readback.
-2. Add process-level memory measurements for allocator overhead and temporary tensors.
-3. Add averaged benchmark runs with min/median/max timings.
-4. Track prefill and decode timings across multiple prompt lengths.
-5. Add prefix-cache extension after the single-prompt prefill path is fully benchmarked.
+1. Add process-level memory measurements for allocator overhead and temporary tensors.
+2. Add averaged benchmark runs with min/median/max timings.
+3. Track prefill and decode timings across multiple prompt lengths.
+4. Add prefix-cache extension after the single-prompt prefill path is fully benchmarked.
 ```

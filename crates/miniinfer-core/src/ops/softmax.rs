@@ -5,21 +5,33 @@ pub fn softmax(value: &[f32]) -> Result<Vec<f32>> {
         return Err(MiniInferError::EmptyInput);
     }
 
+    let mut probabilities = value.to_vec();
+    softmax_in_place(&mut probabilities)?;
+
+    Ok(probabilities)
+}
+
+pub fn softmax_in_place(value: &mut [f32]) -> Result<()> {
+    if value.is_empty() {
+        return Err(MiniInferError::EmptyInput);
+    }
+
     let max = value
         .iter()
         .copied()
         .fold(f32::NEG_INFINITY, f32::max);
 
-    let exp_values: Vec<f32> = value
-        .iter()
-        .map(|x| (*x - max).exp())
-        .collect();
+    let mut sum = 0.0;
+    for value in value.iter_mut() {
+        *value = (*value - max).exp();
+        sum += *value;
+    }
 
-    let sum: f32 = exp_values.iter().sum();
+    for value in value.iter_mut() {
+        *value /= sum;
+    }
 
-    let probabilities = exp_values.iter().map(|x| x / sum).collect();
-
-    Ok(probabilities)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -40,6 +52,16 @@ mod tests {
         let err = softmax(&[]).expect_err("empty softmax input should fail");
 
         assert_eq!(err, MiniInferError::EmptyInput);
+    }
+
+    #[test]
+    fn softmax_in_place_matches_softmax() {
+        let mut values = vec![2.0, 1.0, 0.0];
+
+        softmax_in_place(&mut values).expect("in-place softmax should succeed");
+
+        let expected = softmax(&[2.0, 1.0, 0.0]).expect("softmax should succeed");
+        assert_eq!(values, expected);
     }
 
     #[test]
