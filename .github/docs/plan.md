@@ -152,11 +152,11 @@ This means:
 - use optimized libraries only behind explicit backend boundaries, not as a hidden replacement for the runtime design
 - make caching, quantization, and benchmark comparisons first-class resume signals
 
-### 4.1 Learning-First AI Assistance
+### 4.1 Project Engineering Assistance
 
-This project should rely on agentic coding as little as possible for the low-level inference internals. The project owner should handwrite and understand the core tensor, operation, tokenizer, model, KV-cache, and sampling code that forms the reference implementation.
+MiniInfer should use AI assistance as an engineering accelerator while preserving clear ownership of architecture, correctness, and performance decisions. By default, AI assistance should provide explanations, pseudocode, design guidance, review findings, test plans, and benchmark interpretation rather than direct code changes. Core tensor, operation, tokenizer, model, KV-cache, and sampling changes should stay small, reviewed against explicit invariants, and validated with focused tests or reference outputs.
 
-Copilot may be used for explanation, design review, scaffolding, test planning, debugging, documentation, and small non-core wiring. Library-backed optimized kernels are allowed later when the project owner understands the concept and the backend boundary is explicit. Core implementations should follow the workspace guardrails in [../instructions/miniinfer-learning-first.instructions.md](../instructions/miniinfer-learning-first.instructions.md).
+Copilot may be used for implementation, explanation, design review, scaffolding, test planning, debugging, documentation, and wiring when explicitly requested. Library-backed optimized kernels are allowed when the backend boundary is explicit and reference behavior is tested. Core implementations should follow the workspace guardrails in [../instructions/miniinfer-project-engineering.instructions.md](../instructions/miniinfer-project-engineering.instructions.md).
 
 ---
 
