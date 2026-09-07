@@ -3,12 +3,13 @@ use std::{collections::HashMap, fs::File, io::{Read, Seek, SeekFrom}, path::Path
 use serde::Deserialize;
 
 use crate::{
+    dtype::DType,
     error::{MiniInferError, Result},
     model::{
         config::ModelConfig,
         gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead},
     },
-    tensor::Tensor,
+    tensor::{QuantizedTensor, Tensor},
 };
 
 #[derive(Deserialize)]
@@ -54,7 +55,7 @@ pub(super) struct LmHeadFile {
 #[derive(Deserialize)]
 struct BinaryWeightsIndexFile {
     format_version: u32,
-    dtype: String,
+    dtype: Option<String>,
     endianness: String,
     tensors: HashMap<String, BinaryTensorIndexFile>,
     lm_head: Option<LmHeadFile>,
@@ -63,8 +64,10 @@ struct BinaryWeightsIndexFile {
 #[derive(Deserialize)]
 struct BinaryTensorIndexFile {
     shape: Vec<usize>,
+    dtype: Option<String>,
     offset_bytes: u64,
     len: usize,
+    scale: Option<f32>,
 }
 
 pub(super) fn load_gpt2_weights_from_model_dir(
@@ -177,25 +180,31 @@ pub fn load_gpt2_binary_weights(
 }
 
 fn validate_binary_weight_index(index: &BinaryWeightsIndexFile) -> Result<()> {
-    if index.format_version != 1 {
-        return Err(MiniInferError::InvalidConfig {
-            message: format!("unsupported weights index format version {}", index.format_version),
-        });
-    }
-
-    if index.dtype != "f32" {
-        return Err(MiniInferError::InvalidConfig {
-            message: format!("unsupported weights dtype {}", index.dtype),
-        });
-    }
-
     if index.endianness != "little" {
         return Err(MiniInferError::InvalidConfig {
             message: format!("unsupported weights endianness {}", index.endianness),
         });
     }
 
-    Ok(())
+    match index.format_version {
+        1 => {
+            let dtype = index.dtype.as_deref().ok_or_else(|| MiniInferError::InvalidConfig {
+                message: "v1 weights index must include dtype".to_string(),
+            })?;
+
+            if dtype != "f32" {
+                return Err(MiniInferError::InvalidConfig {
+                    message: format!("unsupported v1 weights dtype {dtype}"),
+                });
+            }
+
+            Ok(())
+        }
+        2 => Ok(()),
+        other => Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported weights index format version {other}"),
+        }),
+    }
 }
 
 fn load_binary_lm_head(data_file: &mut File, index: &BinaryWeightsIndexFile) -> Result<LMHead> {
@@ -215,7 +224,7 @@ fn load_binary_lm_head(data_file: &mut File, index: &BinaryWeightsIndexFile) -> 
 }
 
 fn read_binary_tensor(
-    data_file: &mut File,
+    data_file: &mut (impl Read + Seek),
     index: &BinaryWeightsIndexFile,
     name: &str,
 ) -> Result<Tensor> {
@@ -232,9 +241,15 @@ fn read_binary_tensor(
         });
     }
 
-    let byte_len = tensor_index.len.checked_mul(4).ok_or_else(|| MiniInferError::InvalidConfig {
-        message: format!("tensor {name} byte length overflow"),
-    })?;
+    let dtype = tensor_dtype(index, tensor_index)?;
+
+    let byte_len = tensor_index
+        .len
+        .checked_mul(dtype.size_in_bytes())
+        .ok_or_else(|| MiniInferError::InvalidConfig {
+            message: format!("tensor {name} byte length overflow"),
+        })?;
+
     let mut bytes = vec![0u8; byte_len];
     data_file
         .seek(SeekFrom::Start(tensor_index.offset_bytes))
@@ -245,14 +260,27 @@ fn read_binary_tensor(
         message: format!("failed to read tensor {name}: {error}"),
     })?;
 
-    let mut data = Vec::with_capacity(tensor_index.len);
-    for chunk in bytes.chunks_exact(4) {
-        let mut value_bytes = [0u8; 4];
-        value_bytes.copy_from_slice(chunk);
-        data.push(f32::from_le_bytes(value_bytes));
-    }
+    match dtype {
+        DType::F32 => {
+            let mut data = Vec::with_capacity(tensor_index.len);
+            for chunk in bytes.chunks_exact(4) {
+                let mut value_bytes = [0u8; 4];
+                value_bytes.copy_from_slice(chunk);
+                data.push(f32::from_le_bytes(value_bytes));
+            }
 
-    Tensor::new(tensor_index.shape.clone(), data)
+            Tensor::new(tensor_index.shape.clone(), data)
+        }
+        DType::I8Symmetric => {
+            let scale = tensor_index.scale.ok_or_else(|| MiniInferError::InvalidConfig {
+                message: format!("tensor {name} i8_symmetric dtype requires scale"),
+            })?;
+
+            let data = bytes.iter().map(|byte| *byte as i8).collect::<Vec<i8>>();
+
+            QuantizedTensor::new(tensor_index.shape.clone(), data, scale)?.dequantize()
+        }
+    }
 }
 
 pub(super) fn load_lm_head(
@@ -282,4 +310,159 @@ pub(super) fn load_lm_head(
 
 fn tensor_from_file(tensor: TensorFile) -> Result<Tensor> {
     Tensor::new(tensor.shape, tensor.data)
+}
+
+fn tensor_dtype(index: &BinaryWeightsIndexFile, tensor: &BinaryTensorIndexFile) -> Result<DType> {
+    match index.format_version {
+        1 => {
+            let dtype = index.dtype.as_deref().unwrap_or("f32");
+            let dtype = DType::parse(dtype)?;
+            if dtype != DType::F32 {
+                return Err(MiniInferError::InvalidConfig {
+                    message: format!("unsupported v1 weights dtype {}", index.dtype.as_deref().unwrap_or("missing")),
+                });
+            }
+            Ok(dtype)
+        }
+        2 => {
+            let dtype = tensor.dtype.as_deref().ok_or_else(|| MiniInferError::InvalidConfig {
+                message: "v2 tensor index must include dtype".to_string(),
+            })?;
+            DType::parse(dtype)
+        }
+        other => Err(MiniInferError::InvalidConfig {
+            message: format!("unsupported weights index format version {other}"),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, io::{Cursor, Write}};
+
+    #[test]
+    fn tensor_dtype_uses_v1_top_level_f32_dtype() {
+        let index = binary_index(1, Some("f32"));
+        let tensor = binary_tensor(vec![2], None, 0, 2, None);
+
+        let dtype = tensor_dtype(&index, &tensor).expect("v1 f32 dtype should resolve");
+
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn tensor_dtype_rejects_v2_tensor_without_dtype() {
+        let index = binary_index(2, None);
+        let tensor = binary_tensor(vec![2], None, 0, 2, None);
+
+        let err = tensor_dtype(&index, &tensor).expect_err("v2 tensor dtype should be required");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "v2 tensor index must include dtype".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn read_binary_tensor_reads_v2_f32_tensor() {
+        let mut data_file = binary_data_file(&[1.0, -2.0]);
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor(vec![2], Some("f32"), 0, 2, None),
+        );
+
+        let tensor = read_binary_tensor(&mut data_file, &index, "weight")
+            .expect("v2 f32 tensor should load");
+
+        assert_eq!(tensor.shape(), &[2]);
+        assert_eq!(tensor.data(), &[1.0, -2.0]);
+    }
+
+    #[test]
+    fn read_binary_tensor_reads_v2_i8_symmetric_tensor_and_dequantizes() {
+        let mut data_file = Cursor::new(vec![-2i8 as u8, 0i8 as u8, 4i8 as u8]);
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor(vec![3], Some("i8_symmetric"), 0, 3, Some(0.5)),
+        );
+
+        let tensor = read_binary_tensor(&mut data_file, &index, "weight")
+            .expect("v2 i8 tensor should load and dequantize");
+
+        assert_eq!(tensor.shape(), &[3]);
+        assert_eq!(tensor.data(), &[-1.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn read_binary_tensor_rejects_i8_without_scale() {
+        let mut data_file = Cursor::new(vec![1u8, 2u8]);
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor(vec![2], Some("i8_symmetric"), 0, 2, None),
+        );
+
+        let err = read_binary_tensor(&mut data_file, &index, "weight")
+            .expect_err("i8 tensor without scale should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "tensor weight i8_symmetric dtype requires scale".to_string(),
+            }
+        );
+    }
+
+    fn binary_index(format_version: u32, dtype: Option<&str>) -> BinaryWeightsIndexFile {
+        BinaryWeightsIndexFile {
+            format_version,
+            dtype: dtype.map(str::to_string),
+            endianness: "little".to_string(),
+            tensors: HashMap::new(),
+            lm_head: Some(LmHeadFile { head_type: "tied".to_string(), weight: None }),
+        }
+    }
+
+    fn binary_index_with_tensor(
+        format_version: u32,
+        dtype: Option<&str>,
+        name: &str,
+        tensor: BinaryTensorIndexFile,
+    ) -> BinaryWeightsIndexFile {
+        let mut index = binary_index(format_version, dtype);
+        index.tensors.insert(name.to_string(), tensor);
+        index
+    }
+
+    fn binary_tensor(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        offset_bytes: u64,
+        len: usize,
+        scale: Option<f32>,
+    ) -> BinaryTensorIndexFile {
+        BinaryTensorIndexFile {
+            shape,
+            dtype: dtype.map(str::to_string),
+            offset_bytes,
+            len,
+            scale,
+        }
+    }
+
+    fn binary_data_file(values: &[f32]) -> Cursor<Vec<u8>> {
+        let mut data = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+        for value in values {
+            data.write_all(&value.to_le_bytes()).expect("test data write should succeed");
+        }
+        Cursor::new(data)
+    }
 }
