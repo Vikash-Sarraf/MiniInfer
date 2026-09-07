@@ -13,7 +13,7 @@ The goal is not to wrap an existing model runner. MiniInfer keeps the full infer
 - Autoregressive generation with EOS stopping from model config.
 - Greedy, temperature, top-k, and top-p sampling.
 - CLI streaming output.
-- Per-layer KV-cache decode path for GPT-2 generation.
+- Per-layer KV-cache decode path with optimized full-prompt prefill for GPT-2 generation.
 - Benchmark commands for matmul, no-cache vs KV-cache generation, and KV-cache payload memory.
 
 ## Repository Layout
@@ -112,8 +112,8 @@ Recent local result on Windows 11 Pro with a 13th Gen Intel Core i7-13800H:
 
 | Prompt                                                     | Generated tokens | No-cache tok/s | KV-cache tok/s | Speedup | Outputs match |
 | ---------------------------------------------------------- | ---------------: | -------------: | -------------: | ------: | ------------- |
-| `Hey I bet you're wondering how I got into this situation` |               60 |          2.804 |          4.920 |  1.755x | true          |
-| `Hello world`                                              |               30 |          4.639 |          6.385 |  1.376x | true          |
+| `Hey I bet you're wondering how I got into this situation` |               60 |          5.426 |         11.985 |  2.209x | true          |
+| `Hello world`                                              |               30 |          8.866 |         12.186 |  1.374x | true          |
 
 For GPT-2 small, the current benchmark output also reports KV-cache payload memory. A full 1024-token cache reserves `75,497,472` bytes, or `72.000 MiB`, for FP32 keys and values.
 
@@ -130,8 +130,7 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 - GPT-2 is the only implemented model architecture.
 - CPU is the only runtime target.
 - FP32 is the current weight format; int8 weight-only quantization is future work.
-- KV-cache prompt prefill currently feeds prompt tokens one at a time, so time to first token can be slower with cache enabled.
-- Separated prefill/decode timing is not yet exposed in benchmark output.
+- Benchmark results are currently local single-run measurements, not averaged suites.
 - The runtime is a learning-focused engine, not a production server.
 
 ## Resume Signals
@@ -144,5 +143,5 @@ MiniInfer currently demonstrates:
 - explicit backend boundary for reference and optimized CPU operations
 - deterministic and stochastic generation controls
 - streaming text output
-- per-layer KV-cache decode with benchmarked speedup and payload memory reporting
+- per-layer KV-cache decode with optimized prompt prefill, benchmarked speedup, and payload memory reporting
 - correctness-focused tests and reproducible benchmark commands

@@ -165,6 +165,28 @@ impl LoadedModel {
         }
     }
 
+    pub fn forward_prefill_with_cache_and_backend(
+        &self,
+        token_ids: &[usize],
+        kv_cache: &mut KvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        match self {
+            LoadedModel::Gpt2 { config, weights, .. } => {
+                weights.forward_prefill_with_cache_and_backend(config, token_ids, kv_cache, backend)
+            }
+        }
+    }
+
+    pub fn forward_prefill_with_cache(
+        &self,
+        token_ids: &[usize],
+        kv_cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        let backend = ReferenceBackend::new();
+        self.forward_prefill_with_cache_and_backend(token_ids, kv_cache, &backend)
+    }
+
     pub fn vocab(&self) -> &[String] {
         match self {
             LoadedModel::Gpt2 { tokenizer, .. } => tokenizer.vocab(),
@@ -680,6 +702,29 @@ mod tests {
 
         assert_eq!(logits.shape(), &[1, config.vocab_size]);
         assert_eq!(cache.current_position().expect("position should exist"), 1);
+    }
+
+    #[test]
+    fn loaded_model_forward_prefill_with_cache_returns_logits_and_updates_cache() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/tiny-gpt2");
+        let model = load_model(model_dir).expect("tiny GPT-2 model should load");
+        let config = model.config();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+        let backend = ReferenceBackend::new();
+        let token_ids = [0, 1];
+
+        let logits = model
+            .forward_prefill_with_cache_and_backend(&token_ids, &mut cache, &backend)
+            .expect("prefill forward should succeed");
+
+        assert_eq!(logits.shape(), &[token_ids.len(), config.vocab_size]);
+        assert_eq!(cache.current_position().expect("position should exist"), token_ids.len());
     }
 
     #[test]

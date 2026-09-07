@@ -168,6 +168,8 @@ struct GenerationBenchmarkResult {
     decoded_text: String,
     generated_tokens: usize,
     first_token_elapsed: Option<std::time::Duration>,
+    prefill_elapsed: Option<std::time::Duration>,
+    decode_elapsed: Option<std::time::Duration>,
     generation_elapsed: std::time::Duration,
     kv_cache_memory: Option<KvCacheMemoryReport>,
 }
@@ -178,6 +180,15 @@ impl GenerationBenchmarkResult {
             0.0
         } else {
             self.generated_tokens as f64 / self.generation_elapsed.as_secs_f64()
+        }
+    }
+
+    fn decode_tokens_per_second(&self) -> f64 {
+        match self.decode_elapsed {
+            Some(elapsed) if self.generated_tokens > 0 && !elapsed.is_zero() => {
+                self.generated_tokens as f64 / elapsed.as_secs_f64()
+            }
+            _ => 0.0,
         }
     }
 }
@@ -211,6 +222,8 @@ fn run_generation_benchmark(
             decoded_text: report.decoded_text,
             generated_tokens,
             first_token_elapsed,
+            prefill_elapsed: Some(report.prefill_elapsed),
+            decode_elapsed: Some(report.decode_elapsed),
             generation_elapsed,
             kv_cache_memory: Some(report.kv_cache_memory),
         });
@@ -233,6 +246,8 @@ fn run_generation_benchmark(
         decoded_text,
         generated_tokens,
         first_token_elapsed,
+        prefill_elapsed: None,
+        decode_elapsed: None,
         generation_elapsed,
         kv_cache_memory: None,
     })
@@ -249,6 +264,13 @@ fn print_generation_benchmark_result(
     match result.first_token_elapsed {
         Some(elapsed) => println!("Time to first token: {:.3}s", elapsed.as_secs_f64()),
         None => println!("Time to first token: n/a"),
+    }
+    if let Some(elapsed) = result.prefill_elapsed {
+        println!("Prompt prefill time: {:.3}s", elapsed.as_secs_f64());
+    }
+    if let Some(elapsed) = result.decode_elapsed {
+        println!("Decode time: {:.3}s", elapsed.as_secs_f64());
+        println!("Decode tokens/sec: {:.3}", result.decode_tokens_per_second());
     }
     println!("Generation time: {:.3}s", result.generation_elapsed.as_secs_f64());
     println!("Tokens/sec: {:.3}", result.tokens_per_second());

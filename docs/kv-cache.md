@@ -57,6 +57,8 @@ max_seq_len = 1024
 
 Each append adds one `[1, head_dim]` key row and one `[1, head_dim]` value row per head. Readback methods convert the flat storage back into tensors with shape `[seq_len, head_dim]`.
 
+Prompt prefill uses `append_many` to add all prompt key/value rows for each layer in one full-prompt pass. Decode still uses `append` because each generated token contributes one new row per head.
+
 The cache reports three payload byte counts:
 
 ```text
@@ -113,12 +115,14 @@ GenerationOptions::generate_streaming_with_kv_cache_and_backend
 The model dispatch boundary is in `LoadedModel`:
 
 ```text
+LoadedModel::forward_prefill_with_cache_and_backend
 LoadedModel::forward_next_token_with_cache_and_backend
 ```
 
 The GPT-2 implementation is in `Gpt2Weights`:
 
 ```text
+Gpt2Weights::forward_prefill_with_cache_and_backend
 Gpt2Weights::forward_next_token_with_cache_and_backend
 ```
 
@@ -126,7 +130,7 @@ The current cached generation flow is:
 
 ```text
 1. Create KvCache from model config.
-2. Feed prompt tokens one by one through cached one-token forward.
+2. Run full-prompt prefill once and write prompt keys/values into the cache.
 3. Use the final prompt-token logits to sample the first generated token.
 4. Feed each generated token through cached one-token forward.
 5. Stop on EOS or max_new_tokens.
@@ -162,19 +166,23 @@ Prompt tokens: 12
 Generated tokens: 60
 
 No cache:
-  Generation time: 21.400s
-  Tokens/sec: 2.804
+  Generation time: 11.057s
+  Tokens/sec: 5.426
 
 KV cache:
-  Generation time: 12.195s
-  Tokens/sec: 4.920
+  Time to first token: 0.387s
+  Prompt prefill time: 0.387s
+  Decode time: 4.617s
+  Decode tokens/sec: 12.995
+  Generation time: 5.006s
+  Tokens/sec: 11.985
   Active cache payload: 5308416 bytes (5.062 MiB)
   Allocated cache payload: 75497472 bytes (72.000 MiB)
   Capacity cache payload: 75497472 bytes (72.000 MiB)
 
 Speedup:
-  Generation time: 1.755x
-  Tokens/sec: 1.755x
+  Generation time: 2.209x
+  Tokens/sec: 2.209x
 
 Outputs match: true
 ```
@@ -192,16 +200,16 @@ The current implementation prioritizes correctness and explainability over peak 
 - KV-cache memory reporting covers key/value payload bytes, not allocator metadata, temporary tensors, model weights, tokenizer data, or total process memory.
 - `bench-generate` uses greedy decoding only, which is useful for deterministic speed comparisons.
 
-The token-by-token prefill means time to first token can be slower with KV cache for longer prompts. Decode throughput still improves because generated tokens reuse cached keys and values instead of recomputing attention over the full generated sequence.
+KV-cache time to first token can still be higher than the no-cache first step because the cache path fills the full prompt cache before sampling. Decode throughput improves because generated tokens reuse cached keys and values instead of recomputing attention over the full generated sequence.
 
 ## Next Improvements
 
 Possible follow-up work:
 
 ```text
-1. Split prompt prefill time from decode time in benchmark output.
-2. Optimize prompt prefill by computing full prompt keys/values in one pass.
-3. Avoid cloning cached key/value buffers during attention readback.
-4. Add process-level memory measurements for allocator overhead and temporary tensors.
-5. Add averaged benchmark runs with min/median/max timings.
+1. Avoid cloning cached key/value buffers during attention readback.
+2. Add process-level memory measurements for allocator overhead and temporary tensors.
+3. Add averaged benchmark runs with min/median/max timings.
+4. Track prefill and decode timings across multiple prompt lengths.
+5. Add prefix-cache extension after the single-prompt prefill path is fully benchmarked.
 ```

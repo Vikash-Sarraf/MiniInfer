@@ -19,6 +19,8 @@ pub struct GenerationOptions {
 pub struct KvCacheGenerationReport {
     pub decoded_text: String,
     pub kv_cache_memory: KvCacheMemoryReport,
+    pub prefill_elapsed: std::time::Duration,
+    pub decode_elapsed: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,24 +362,21 @@ where
         return Ok(KvCacheGenerationReport {
             decoded_text: model.decode_tokens(token_ids)?,
             kv_cache_memory: KvCacheMemoryReport::from_cache(&kv_cache),
+            prefill_elapsed: std::time::Duration::ZERO,
+            decode_elapsed: std::time::Duration::ZERO,
         });
     }
 
-    let mut logits = None;
-    for &token_id in token_ids {
-        logits = Some(model.forward_next_token_with_cache_and_backend(
-            token_id,
-            &mut kv_cache,
-            backend,
-        )?);
-    }
-
-    let mut logits = match logits {
-        Some(logits) => logits,
-        None => return Err(MiniInferError::EmptyInput),
-    };
+    let prefill_start = std::time::Instant::now();
+    let mut logits = model.forward_prefill_with_cache_and_backend(
+        token_ids,
+        &mut kv_cache,
+        backend,
+    )?;
+    let prefill_elapsed = prefill_start.elapsed();
     let mut token_ids = token_ids.to_vec();
 
+    let decode_start = std::time::Instant::now();
     for generated_index in 0..max_new_tokens {
         let next_token_id = sampler.sample(&logits)?;
 
@@ -393,10 +392,13 @@ where
             backend,
         )?;
     }
+    let decode_elapsed = decode_start.elapsed();
 
     Ok(KvCacheGenerationReport {
         decoded_text: model.decode_tokens(&token_ids)?,
         kv_cache_memory: KvCacheMemoryReport::from_cache(&kv_cache),
+        prefill_elapsed,
+        decode_elapsed,
     })
 }
 
@@ -429,19 +431,11 @@ where
         config.max_position_embeddings,
     )?;
 
-    let mut logits = None;
-    for &token_id in &token_ids {
-        logits = Some(model.forward_next_token_with_cache_and_backend(
-            token_id,
-            &mut kv_cache,
-            backend,
-        )?);
-    }
-
-    let mut logits = match logits {
-        Some(logits) => logits,
-        None => return Err(MiniInferError::EmptyInput),
-    };
+    let mut logits = model.forward_prefill_with_cache_and_backend(
+        &token_ids,
+        &mut kv_cache,
+        backend,
+    )?;
 
     for _ in 0..max_new_tokens {
         let next_token_id = sampler.sample(&logits)?;
@@ -672,6 +666,8 @@ mod tests {
         assert_eq!(report.kv_cache_memory.active_bytes, 64);
         assert_eq!(report.kv_cache_memory.allocated_bytes, 256);
         assert_eq!(report.kv_cache_memory.capacity_bytes, 256);
+        assert!(report.prefill_elapsed >= std::time::Duration::ZERO);
+        assert!(report.decode_elapsed >= std::time::Duration::ZERO);
     }
 
     #[test]

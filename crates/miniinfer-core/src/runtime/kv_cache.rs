@@ -128,6 +128,59 @@ impl LayerKvCache {
         }
         self.seq_len = 0;
     }
+
+    pub fn append_many(&mut self, new_keys: &[Tensor], new_values: &[Tensor]) -> Result<()> {
+        if new_keys.len() != self.num_heads {
+            return Err(MiniInferError::LengthMismatch {
+                expected: self.num_heads,
+                actual: new_keys.len(),
+            });
+        }
+
+        if new_values.len() != self.num_heads {
+            return Err(MiniInferError::LengthMismatch {
+                expected: self.num_heads,
+                actual: new_values.len(),
+            });
+        }
+
+        let rows = validate_head_rows(&new_keys[0], self.head_dim)?;
+
+        if rows == 0 {
+            return Err(MiniInferError::EmptyInput);
+        }
+
+        if self.seq_len + rows > self.max_seq_len {
+            return Err(MiniInferError::InvalidConfig {
+                message: "Exceeding max sequence length".to_string(),
+            });
+        }
+
+        for head in 0..self.num_heads {
+            let key_rows = validate_head_rows(&new_keys[head], self.head_dim)?;
+            let value_rows = validate_head_rows(&new_values[head], self.head_dim)?;
+
+            if key_rows != rows {
+                return Err(MiniInferError::InvalidTensorShape {
+                    expected: vec![rows, self.head_dim],
+                    actual: new_keys[head].shape().to_vec(),
+                });
+            }
+
+            if value_rows != rows {
+                return Err(MiniInferError::InvalidTensorShape {
+                    expected: vec![rows, self.head_dim],
+                    actual: new_values[head].shape().to_vec(),
+                });
+            }
+
+            self.keys[head].extend_from_slice(new_keys[head].data());
+            self.values[head].extend_from_slice(new_values[head].data());
+        }
+
+        self.seq_len += rows;
+        Ok(())
+    }
 }
 
 fn validate_head_row(tensor: &Tensor, head_dim: usize) -> Result<()> {
@@ -139,6 +192,24 @@ fn validate_head_row(tensor: &Tensor, head_dim: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_head_rows(tensor: &Tensor, head_dim: usize) -> Result<usize> {
+    if tensor.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: tensor.shape().len(),
+        });
+    }
+
+    if tensor.shape()[1] != head_dim {
+        return Err(MiniInferError::InvalidTensorShape {
+            expected: vec![tensor.shape()[0], head_dim],
+            actual: tensor.shape().to_vec(),
+        });
+    }
+
+    Ok(tensor.shape()[0])
 }
 
 impl KvCache {
@@ -220,6 +291,10 @@ mod tests {
 
     fn row(values: &[f32]) -> Tensor {
         Tensor::new(vec![1, values.len()], values.to_vec()).expect("row tensor should be valid")
+    }
+
+    fn rows(row_count: usize, head_dim: usize, values: &[f32]) -> Tensor {
+        Tensor::new(vec![row_count, head_dim], values.to_vec()).expect("rows tensor should be valid")
     }
 
     fn expect_empty_input(result: Result<Tensor>) {
@@ -337,6 +412,176 @@ mod tests {
         assert_eq!(key.data(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(value.shape(), &[2, 2]);
         assert_eq!(value.data(), &[10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn layer_cache_append_many_appends_multiple_rows_per_head() {
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        cache
+            .append_many(
+                &[
+                    rows(2, 2, &[1.0, 2.0, 3.0, 4.0]),
+                    rows(2, 2, &[5.0, 6.0, 7.0, 8.0]),
+                ],
+                &[
+                    rows(2, 2, &[10.0, 20.0, 30.0, 40.0]),
+                    rows(2, 2, &[50.0, 60.0, 70.0, 80.0]),
+                ],
+            )
+            .expect("append_many should succeed");
+
+        assert_eq!(cache.seq_len(), 2);
+        assert_eq!(cache.active_bytes(), 64);
+
+        let head_zero_key = cache.key_for_head(0).expect("key should exist");
+        let head_one_value = cache.value_for_head(1).expect("value should exist");
+
+        assert_eq!(head_zero_key.shape(), &[2, 2]);
+        assert_eq!(head_zero_key.data(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(head_one_value.shape(), &[2, 2]);
+        assert_eq!(head_one_value.data(), &[50.0, 60.0, 70.0, 80.0]);
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_wrong_key_head_count() {
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let err = cache
+            .append_many(
+                &[rows(2, 2, &[1.0, 2.0, 3.0, 4.0])],
+                &[
+                    rows(2, 2, &[10.0, 20.0, 30.0, 40.0]),
+                    rows(2, 2, &[50.0, 60.0, 70.0, 80.0]),
+                ],
+            )
+            .expect_err("wrong key head count should fail");
+
+        assert_eq!(err, MiniInferError::LengthMismatch { expected: 2, actual: 1 });
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_wrong_value_head_count() {
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let err = cache
+            .append_many(
+                &[
+                    rows(2, 2, &[1.0, 2.0, 3.0, 4.0]),
+                    rows(2, 2, &[5.0, 6.0, 7.0, 8.0]),
+                ],
+                &[rows(2, 2, &[10.0, 20.0, 30.0, 40.0])],
+            )
+            .expect_err("wrong value head count should fail");
+
+        assert_eq!(err, MiniInferError::LengthMismatch { expected: 2, actual: 1 });
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_wrong_key_rank() {
+        let mut cache = LayerKvCache::new(1, 2, 4).expect("cache should be valid");
+        let bad_key = Tensor::new(vec![2], vec![1.0, 2.0]).expect("valid tensor");
+
+        let err = cache
+            .append_many(&[bad_key], &[rows(1, 2, &[3.0, 4.0])])
+            .expect_err("wrong key rank should fail");
+
+        assert_eq!(err, MiniInferError::WrongRank { expected: 2, actual: 1 });
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_wrong_head_dim() {
+        let mut cache = LayerKvCache::new(1, 2, 4).expect("cache should be valid");
+
+        let err = cache
+            .append_many(
+                &[Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid tensor")],
+                &[rows(2, 2, &[7.0, 8.0, 9.0, 10.0])],
+            )
+            .expect_err("wrong head dim should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![2, 2],
+                actual: vec![2, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_inconsistent_key_rows() {
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let err = cache
+            .append_many(
+                &[
+                    rows(2, 2, &[1.0, 2.0, 3.0, 4.0]),
+                    rows(1, 2, &[5.0, 6.0]),
+                ],
+                &[
+                    rows(2, 2, &[10.0, 20.0, 30.0, 40.0]),
+                    rows(2, 2, &[50.0, 60.0, 70.0, 80.0]),
+                ],
+            )
+            .expect_err("inconsistent key rows should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![2, 2],
+                actual: vec![1, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_inconsistent_value_rows() {
+        let mut cache = LayerKvCache::new(2, 2, 4).expect("cache should be valid");
+
+        let err = cache
+            .append_many(
+                &[
+                    rows(2, 2, &[1.0, 2.0, 3.0, 4.0]),
+                    rows(2, 2, &[5.0, 6.0, 7.0, 8.0]),
+                ],
+                &[
+                    rows(2, 2, &[10.0, 20.0, 30.0, 40.0]),
+                    rows(1, 2, &[50.0, 60.0]),
+                ],
+            )
+            .expect_err("inconsistent value rows should fail");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidTensorShape {
+                expected: vec![2, 2],
+                actual: vec![1, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn layer_cache_append_many_rejects_context_overflow() {
+        let mut cache = LayerKvCache::new(1, 2, 2).expect("cache should be valid");
+
+        cache
+            .append(&[row(&[1.0, 2.0])], &[row(&[3.0, 4.0])])
+            .expect("append should succeed");
+
+        let err = cache
+            .append_many(
+                &[rows(2, 2, &[5.0, 6.0, 7.0, 8.0])],
+                &[rows(2, 2, &[9.0, 10.0, 11.0, 12.0])],
+            )
+            .expect_err("append_many should reject overflow");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "Exceeding max sequence length".to_string(),
+            }
+        );
     }
 
     #[test]

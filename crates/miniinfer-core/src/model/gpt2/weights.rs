@@ -1,5 +1,12 @@
 use crate::{
-    error::{MiniInferError, Result}, model::config::ModelConfig, ops::{backend::{OpsBackend, ReferenceBackend}, embedding, vector_add, layer_norm}, runtime::kv_cache::KvCache, tensor::Tensor,
+    error::{MiniInferError, Result},
+    model::config::ModelConfig,
+    ops::{
+        backend::{OpsBackend, ReferenceBackend},
+        embedding, layer_norm, vector_add,
+    },
+    runtime::kv_cache::KvCache,
+    tensor::Tensor,
 };
 
 use super::{validate_shape, Gpt2BlockWeights};
@@ -87,35 +94,7 @@ impl Gpt2Weights {
     }
 
     pub fn apply_f_ln(&self, hidden: &Tensor, epsilon: f32) -> Result<Tensor> {
-        if hidden.shape().len() != 2 {
-            return Err(MiniInferError::WrongRank {
-                expected: 2,
-                actual: hidden.shape().len(),
-            });
-        }
-        let seq_len = hidden.shape()[0];
-        let hidden_size = hidden.shape()[1];
-
-        validate_shape(&self.ln_f_weight, &[hidden_size])?;
-        validate_shape(&self.ln_f_bias, &[hidden_size])?;
-
-        let mut output = Vec::with_capacity(seq_len * hidden_size);
-
-        for row in 0..seq_len {
-            let mut row_values = Vec::with_capacity(hidden_size);
-            for col in 0..hidden_size {
-                row_values.push(hidden.get_2d(row, col)?);
-            }
-
-            let normalized = layer_norm::layer_norm(
-                &row_values,
-                self.ln_f_weight.data(),
-                self.ln_f_bias.data(),
-                epsilon,
-            )?;
-            output.extend(normalized);
-        }
-        Tensor::new(vec![seq_len, hidden_size], output)
+        apply_layer_norm_rows(hidden, &self.ln_f_weight, &self.ln_f_bias, epsilon)
     }
 
     pub fn forward(&self, config: &ModelConfig, token_ids: &[usize]) -> Result<Tensor> {
@@ -129,21 +108,8 @@ impl Gpt2Weights {
         token_ids: &[usize],
         backend: &dyn OpsBackend,
     ) -> Result<Tensor> {
-        self.validate_shapes(config)?;
-        let mut hidden = self.embed_tokens(token_ids)?;
-
-        for block in &self.blocks {
-            hidden = block.forward_with_backend(&hidden, config.head_dim(), config.layer_norm_epsilon, backend)?;
-        }
-
-        hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
-
-        hidden = match &self.lm_head_weight {
-            LMHead::Tied => project_tied_lm_head(&hidden, &self.wte)?,
-            LMHead::Untied(weight) => backend.matmul(&hidden, weight)?,
-        };
-
-        Ok(hidden)
+        let hidden = self.forward_hidden_with_backend(config, token_ids, backend)?;
+        self.project_final_logits_with_backend(config, &hidden, backend)
     }
 
     pub fn forward_last_logits(&self, config: &ModelConfig, token_ids: &[usize]) -> Result<Tensor> {
@@ -157,22 +123,10 @@ impl Gpt2Weights {
         token_ids: &[usize],
         backend: &dyn OpsBackend,
     ) -> Result<Tensor> {
-        self.validate_shapes(config)?;
-
-        let mut hidden = self.embed_tokens(token_ids)?;
-
-        for block in &self.blocks {
-            hidden = block.forward_with_backend(&hidden, config.head_dim(), config.layer_norm_epsilon, backend)?;
-        }
-
-        hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
-
+        let hidden = self.forward_hidden_with_backend(config, token_ids, backend)?;
+        let hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
         let last_hidden = last_hidden_row(&hidden)?;
-
-        match &self.lm_head_weight {
-            LMHead::Tied => project_tied_lm_head(&last_hidden, &self.wte),
-            LMHead::Untied(weight) => backend.matmul(&last_hidden, weight),
-        }
+        self.project_lm_head_with_backend(&last_hidden, backend)
     }
 
     pub fn forward_next_token_with_cache(
@@ -208,13 +162,119 @@ impl Gpt2Weights {
             )?;
         }
 
-        hidden = self.apply_f_ln(&hidden, config.layer_norm_epsilon)?;
+        self.project_final_logits_with_backend(config, &hidden, backend)
+    }
 
+    pub fn forward_prefill_with_cache_and_backend(
+        &self,
+        config: &ModelConfig,
+        token_ids: &[usize],
+        kv_cache: &mut KvCache,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        self.validate_shapes(config)?;
+
+        if token_ids.is_empty() {
+            return Err(MiniInferError::EmptyInput);
+        }
+
+        if kv_cache.current_position()? != 0 {
+            return Err(MiniInferError::InvalidConfig {
+                message: "prefill requires an empty KV cache".to_string(),
+            });
+        }
+
+        let mut hidden = self.embed_tokens(token_ids)?;
+
+        for (layer_index, block) in self.blocks.iter().enumerate() {
+            let layer_cache = kv_cache.layer_mut(layer_index)?;
+            hidden = block.forward_prefill_with_kv_cache_and_backend(
+                &hidden,
+                config.head_dim(),
+                config.layer_norm_epsilon,
+                layer_cache,
+                backend,
+            )?;
+        }
+
+        self.project_final_logits_with_backend(config, &hidden, backend)
+    }
+
+    fn forward_hidden_with_backend(
+        &self,
+        config: &ModelConfig,
+        token_ids: &[usize],
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        self.validate_shapes(config)?;
+        let mut hidden = self.embed_tokens(token_ids)?;
+
+        for block in &self.blocks {
+            hidden = block.forward_with_backend(&hidden, config.head_dim(), config.layer_norm_epsilon, backend)?;
+        }
+
+        Ok(hidden)
+    }
+
+    fn project_final_logits_with_backend(
+        &self,
+        config: &ModelConfig,
+        hidden: &Tensor,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
+        let hidden = self.apply_f_ln(hidden, config.layer_norm_epsilon)?;
+        self.project_lm_head_with_backend(&hidden, backend)
+    }
+
+    fn project_lm_head_with_backend(
+        &self,
+        hidden: &Tensor,
+        backend: &dyn OpsBackend,
+    ) -> Result<Tensor> {
         match &self.lm_head_weight {
-            LMHead::Tied => project_tied_lm_head(&hidden, &self.wte),
-            LMHead::Untied(weight) => backend.matmul(&hidden, weight),
+            LMHead::Tied => project_tied_lm_head(hidden, &self.wte),
+            LMHead::Untied(weight) => backend.matmul(hidden, weight),
         }
     }
+}
+
+fn apply_layer_norm_rows(
+    hidden: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    epsilon: f32,
+) -> Result<Tensor> {
+    if hidden.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: hidden.shape().len(),
+        });
+    }
+
+    let seq_len = hidden.shape()[0];
+    let hidden_size = hidden.shape()[1];
+
+    validate_shape(weight, &[hidden_size])?;
+    validate_shape(bias, &[hidden_size])?;
+
+    let mut output = Vec::with_capacity(seq_len * hidden_size);
+
+    for row in 0..seq_len {
+        let mut row_values = Vec::with_capacity(hidden_size);
+        for col in 0..hidden_size {
+            row_values.push(hidden.get_2d(row, col)?);
+        }
+
+        let normalized = layer_norm::layer_norm(
+            &row_values,
+            weight.data(),
+            bias.data(),
+            epsilon,
+        )?;
+        output.extend(normalized);
+    }
+
+    Tensor::new(vec![seq_len, hidden_size], output)
 }
 
 fn last_hidden_row(hidden: &Tensor) -> Result<Tensor> {
@@ -467,6 +527,88 @@ mod tests {
 
         assert_eq!(logits.shape(), &[1, config.vocab_size]);
         assert_eq!(cache.current_position().expect("position should exist"), 1);
+    }
+
+    #[test]
+    fn forward_prefill_with_cache_matches_normal_forward_and_updates_cache() {
+        let config = tiny_config();
+        let weights = tiny_weights();
+        let backend = ReferenceBackend::new();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+
+        let token_ids = [0, 1];
+
+        let normal = weights
+            .forward_with_backend(&config, &token_ids, &backend)
+            .expect("normal forward should succeed");
+        let prefill = weights
+            .forward_prefill_with_cache_and_backend(&config, &token_ids, &mut cache, &backend)
+            .expect("prefill forward should succeed");
+
+        assert_eq!(prefill.shape(), normal.shape());
+        assert!(
+            prefill
+                .data()
+                .iter()
+                .zip(normal.data().iter())
+                .all(|(actual, expected)| (*actual - *expected).abs() < 1e-5)
+        );
+        assert_eq!(cache.current_position().expect("position should exist"), token_ids.len());
+    }
+
+    #[test]
+    fn forward_prefill_with_cache_rejects_empty_prompt() {
+        let config = tiny_config();
+        let weights = tiny_weights();
+        let backend = ReferenceBackend::new();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+
+        let err = weights
+            .forward_prefill_with_cache_and_backend(&config, &[], &mut cache, &backend)
+            .expect_err("empty prefill prompt should fail");
+
+        assert_eq!(err, MiniInferError::EmptyInput);
+    }
+
+    #[test]
+    fn forward_prefill_with_cache_rejects_non_empty_cache() {
+        let config = tiny_config();
+        let weights = tiny_weights();
+        let backend = ReferenceBackend::new();
+        let mut cache = KvCache::new(
+            config.num_layers,
+            config.num_heads,
+            config.head_dim(),
+            config.max_position_embeddings,
+        )
+        .expect("cache should be valid");
+
+        weights
+            .forward_next_token_with_cache_and_backend(&config, 0, &mut cache, &backend)
+            .expect("first cached token should succeed");
+
+        let err = weights
+            .forward_prefill_with_cache_and_backend(&config, &[1, 2], &mut cache, &backend)
+            .expect_err("prefill should require an empty cache");
+
+        assert_eq!(
+            err,
+            MiniInferError::InvalidConfig {
+                message: "prefill requires an empty KV cache".to_string(),
+            }
+        );
     }
 
     #[test]
