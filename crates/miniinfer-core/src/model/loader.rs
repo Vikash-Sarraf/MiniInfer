@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs::File, io::{Read, Seek, SeekFrom}, path::Path
 use serde::Deserialize;
 
 use crate::{
-    error::{MiniInferError, Result}, model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}}, ops::backend::{OpsBackend, ReferenceBackend}, runtime::kv_cache::KvCache, tensor::Tensor, tokenizer::{gpt2::Gpt2Tokenizer, tokenizer::{LoadedTokenizer, TinyTokenizer, Tokenizer}},
+    error::{MiniInferError, Result}, model::{config::{Architecture, ModelConfig}, gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead}}, ops::backend::{OpsBackend, ReferenceBackend}, runtime::kv_cache::KvCache, tensor::Tensor, tokenizer::{api::{LoadedTokenizer, TinyTokenizer, Tokenizer}, gpt2::Gpt2Tokenizer},
 };
 
 #[derive(Deserialize)]

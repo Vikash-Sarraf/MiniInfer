@@ -1,2 +1,2 @@
-pub mod tokenizer;
+pub mod api;
 pub mod gpt2;

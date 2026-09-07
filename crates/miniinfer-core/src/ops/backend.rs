@@ -17,6 +17,12 @@ impl ReferenceBackend {
     }
 }
 
+impl Default for ReferenceBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OpsBackend for ReferenceBackend {
     fn name(&self) -> &'static str {
         "reference"
@@ -35,6 +41,12 @@ pub struct NdArrayBackend;
 impl NdArrayBackend {
     pub fn new() -> Self {
         NdArrayBackend
+    }
+}
+
+impl Default for NdArrayBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

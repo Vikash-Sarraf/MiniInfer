@@ -289,10 +289,10 @@ impl Gpt2BlockWeights {
         layer_cache.append_many(&key_heads, &value_heads)?;
 
         let mut context_heads = Vec::with_capacity(query_heads.len());
-        for head_index in 0..query_heads.len() {
-            let scores = attention_scores(&query_heads[head_index], &key_heads[head_index], head_dim)?;
+        for ((query_head, key_head), value_head) in query_heads.iter().zip(&key_heads).zip(&value_heads) {
+            let scores = attention_scores(query_head, key_head, head_dim)?;
             let probabilities = causal_softmax(&scores)?;
-            let context = attention_output_with_backend(&probabilities, &value_heads[head_index], backend)?;
+            let context = attention_output_with_backend(&probabilities, value_head, backend)?;
             context_heads.push(context);
         }
 
@@ -313,12 +313,12 @@ impl Gpt2BlockWeights {
 
         let mut context_heads = Vec::with_capacity(query_heads.len());
 
-        for head_index in 0..query_heads.len() {
+        for (head_index, query_head) in query_heads.iter().enumerate() {
             let cached_key = layer_cache.key_for_head(head_index)?;
             let cached_value = layer_cache.value_for_head(head_index)?;
 
             let context = cached_attention_output_for_head(
-                &query_heads[head_index],
+            query_head,
                 &cached_key,
                 &cached_value,
                 head_dim,
@@ -552,9 +552,7 @@ fn causal_softmax(scores: &Tensor) -> Result<Tensor> {
             output.push(prob);
         }
 
-        for _ in (row + 1)..cols {
-            output.push(0.0);
-        }
+        output.extend(std::iter::repeat_n(0.0, cols - row - 1));
     }
     Tensor::new(vec![rows, cols], output)
 }
@@ -647,9 +645,9 @@ fn merge_heads(heads: &[Tensor]) -> Result<Tensor> {
     let mut output = Vec::with_capacity(seq_len * hidden_size);
 
     for row in 0..seq_len {
-        for head_index in 0..num_heads {
+        for head in heads {
             for col in 0..head_dim {
-                output.push(heads[head_index].get_2d(row, col)?);
+                output.push(head.get_2d(row, col)?);
             }
         }
     }

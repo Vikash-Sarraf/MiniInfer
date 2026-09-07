@@ -41,7 +41,7 @@ impl Tokenizer for LoadedTokenizer {
 
 impl Tokenizer for TinyTokenizer {
     fn encode(&self, text: &str) -> Result<Vec<usize>> {
-       let mut token_ids = Vec::new();
+        let mut token_ids = Vec::new();
 
         for word in text.split_whitespace() {
             let token_id = self.vocab.iter().position(|token| token == word);
@@ -49,10 +49,10 @@ impl Tokenizer for TinyTokenizer {
             match token_id {
                 Some(index) => token_ids.push(index),
                 None => return Err(MiniInferError::InvalidInput),
-            } 
+            }
         }
 
-       Ok(token_ids)
+        Ok(token_ids)
     }
 
     fn decode(&self, token_ids: &[usize]) -> Result<String> {
@@ -116,7 +116,7 @@ pub mod tests {
         let vocab = vec!["hello".to_string(), "world".to_string()];
         let tokenizer = TinyTokenizer::new(vocab);
 
-        let token_ids = vec![0, 2]; // 2 is out of bounds
+        let token_ids = vec![0, 2];
         let err = tokenizer
             .decode(&token_ids)
             .expect_err("out-of-bounds token ID should fail");
@@ -143,5 +143,4 @@ pub mod tests {
         let decoded_text = tokenizer.decode(&token_ids).expect("Decoding failed");
         assert_eq!(decoded_text, "");
     }
-
 }

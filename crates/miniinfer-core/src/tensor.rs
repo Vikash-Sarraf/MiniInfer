@@ -11,7 +11,7 @@ impl Tensor {
         if shape.is_empty() {
             return Err(MiniInferError::EmptyShape);
         }
-        if shape.iter().any(|dim| *dim == 0) {
+        if shape.contains(&0) {
             return Err(MiniInferError::ZeroDimension);
         }
 

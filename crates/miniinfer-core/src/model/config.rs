@@ -55,10 +55,10 @@ impl ModelConfig {
             return Err(MiniInferError::InvalidConfig { message: "Hidden size must be divisible by number of heads".to_string() });
         }
 
-        if let Some(eos_token_id) = self.eos_token_id {
-            if eos_token_id >= self.vocab_size {
-                return Err(MiniInferError::InvalidConfig { message: "eos_token_id must be less than vocab_size".to_string() });
-            }
+        if let Some(eos_token_id) = self.eos_token_id
+            && eos_token_id >= self.vocab_size
+        {
+            return Err(MiniInferError::InvalidConfig { message: "eos_token_id must be less than vocab_size".to_string() });
         }
 
         Ok(())

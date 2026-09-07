@@ -54,22 +54,22 @@ impl GenerationOptions {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if let Some(temp) = self.temperature {
-            if !temp.is_finite() || temp <= 0.0 {
-                return Err(MiniInferError::InvalidTemperature { temperature: temp });
-            }
+        if let Some(temp) = self.temperature
+            && (!temp.is_finite() || temp <= 0.0)
+        {
+            return Err(MiniInferError::InvalidTemperature { temperature: temp });
         }
 
-        if let Some(top_k) = self.top_k {
-            if top_k == 0 {
-                return Err(MiniInferError::InvalidTopK { top_k });
-            }
+        if let Some(top_k) = self.top_k
+            && top_k == 0
+        {
+            return Err(MiniInferError::InvalidTopK { top_k });
         }
 
-        if let Some(top_p) = self.top_p {
-            if !top_p.is_finite() || top_p <= 0.0 || top_p > 1.0 {
-                return Err(MiniInferError::InvalidTopP { top_p });
-            }
+        if let Some(top_p) = self.top_p
+            && (!top_p.is_finite() || top_p <= 0.0 || top_p > 1.0)
+        {
+            return Err(MiniInferError::InvalidTopP { top_p });
         }
 
         Ok(())

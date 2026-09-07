@@ -13,6 +13,7 @@ Thumbs.db
 .env.*
 
 # Large raw model artifacts should stay local.
+models/**/
 models/**/raw/
 models/**/*.bin
 models/**/*.h5

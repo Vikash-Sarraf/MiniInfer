@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path, sync::LazyLock};
 
-use crate::{error::{MiniInferError, Result}, tokenizer::tokenizer::Tokenizer};
+use crate::{error::{MiniInferError, Result}, tokenizer::api::Tokenizer};
 
 static GPT2_PRE_TOKEN_PATTERN: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     fancy_regex::Regex::new(
@@ -173,18 +173,15 @@ fn merge_once(
     for index in 0..(pieces.len() - 1) {
         let pair = (pieces[index].clone(), pieces[index + 1].clone());
 
-        if let Some(&rank) = merges.get(&pair) {
-            if best_rank.is_none() || rank < best_rank.unwrap() {
-                best_rank = Some(rank);
-                best_index = Some(index);
-            }
+        if let Some(&rank) = merges.get(&pair)
+            && (best_rank.is_none() || rank < best_rank.unwrap())
+        {
+            best_rank = Some(rank);
+            best_index = Some(index);
         }
     }
 
-    let best_index = match best_index {
-        Some(index) => index,
-        None => return None,
-    };
+    let best_index = best_index?;
 
     let mut output = Vec::with_capacity(pieces.len() - 1);
     let mut index = 0;
