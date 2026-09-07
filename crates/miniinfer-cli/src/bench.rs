@@ -65,6 +65,12 @@ fn tensors_close(a: &Tensor, b: &Tensor, tolerance: f32) -> bool {
 }
 
 pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
+    if args.runs == 0 {
+        return Err(MiniInferError::InvalidConfig {
+            message: "runs must be greater than zero".to_string(),
+        });
+    }
+
     let total_start = std::time::Instant::now();
     let load_start = std::time::Instant::now();
     let model = load_model(args.model)?;
@@ -87,81 +93,117 @@ pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
     }
 
     if args.compare_cache {
-        let (no_cache_result, kv_cache_result) = with_backend(args.backend, |backend| {
-            let no_cache_result = run_generation_benchmark(
-                &model,
-                &token_ids,
-                args.max_new_tokens,
-                backend,
-                false,
-            )?;
-            let kv_cache_result = run_generation_benchmark(
-                &model,
-                &token_ids,
-                args.max_new_tokens,
-                backend,
-                true,
-            )?;
+        let (no_cache_results, kv_cache_results) = with_backend(args.backend, |backend| {
+            let mut no_cache_results = Vec::with_capacity(args.runs);
+            let mut kv_cache_results = Vec::with_capacity(args.runs);
 
-            Ok((no_cache_result, kv_cache_result))
+            for _ in 0..args.runs {
+                no_cache_results.push(run_generation_benchmark(
+                    &model,
+                    &token_ids,
+                    args.max_new_tokens,
+                    backend,
+                    false,
+                )?);
+                kv_cache_results.push(run_generation_benchmark(
+                    &model,
+                    &token_ids,
+                    args.max_new_tokens,
+                    backend,
+                    true,
+                )?);
+            }
+
+            Ok((no_cache_results, kv_cache_results))
         })?;
 
         let total_elapsed = total_start.elapsed();
+        let no_cache_summary = summarize_generation_benchmark_results(&no_cache_results)?;
+        let kv_cache_summary = summarize_generation_benchmark_results(&kv_cache_results)?;
 
         println!("Backend: {}", args.backend);
+        println!("Runs: {}", args.runs);
         println!("Prompt tokens: {prompt_tokens}");
         println!("Requested tokens: {}", args.max_new_tokens);
         println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
         println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
         println!();
-        print_generation_benchmark_result("No cache", prompt_tokens, &no_cache_result);
+        print_generation_benchmark_runs("No cache", prompt_tokens, &no_cache_results, &no_cache_summary);
         println!();
-        print_generation_benchmark_result("KV cache", prompt_tokens, &kv_cache_result);
+        print_generation_benchmark_runs("KV cache", prompt_tokens, &kv_cache_results, &kv_cache_summary);
         println!();
         println!("Speedup:");
         println!(
             "Generation time: {:.3}x",
             speedup_ratio(
-                no_cache_result.generation_elapsed.as_secs_f64(),
-                kv_cache_result.generation_elapsed.as_secs_f64(),
+                no_cache_summary.generation_elapsed.median.as_secs_f64(),
+                kv_cache_summary.generation_elapsed.median.as_secs_f64(),
             )
         );
         println!(
             "Tokens/sec: {:.3}x",
             speedup_ratio(
-                kv_cache_result.tokens_per_second(),
-                no_cache_result.tokens_per_second(),
+                kv_cache_summary.tokens_per_second.median,
+                no_cache_summary.tokens_per_second.median,
             )
         );
-        println!("Outputs match: {}", no_cache_result.decoded_text == kv_cache_result.decoded_text);
+        println!("Outputs match: {}", comparison_outputs_match(&no_cache_results, &kv_cache_results));
         println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
-        println!("Result: {}", kv_cache_result.decoded_text);
+        println!("Result: {}", kv_cache_summary.decoded_text);
     } else {
-        let result = with_backend(args.backend, |backend| {
-            run_generation_benchmark(&model, &token_ids, args.max_new_tokens, backend, args.kv_cache)
+        let results = with_backend(args.backend, |backend| {
+            let mut results = Vec::with_capacity(args.runs);
+            for _ in 0..args.runs {
+                results.push(run_generation_benchmark(
+                    &model,
+                    &token_ids,
+                    args.max_new_tokens,
+                    backend,
+                    args.kv_cache,
+                )?);
+            }
+            Ok(results)
         })?;
+        let summary = summarize_generation_benchmark_results(&results)?;
         let total_elapsed = total_start.elapsed();
 
         println!("Backend: {}", args.backend);
         println!("Cache: {}", if args.kv_cache { "kv" } else { "none" });
+        println!("Runs: {}", args.runs);
         println!("Prompt tokens: {prompt_tokens}");
-        println!("Generated tokens: {}", result.generated_tokens);
-        println!("Final tokens: {}", prompt_tokens + result.generated_tokens);
         println!("Load time: {:.3}s", load_elapsed.as_secs_f64());
         println!("Encode time: {:.3}s", encode_elapsed.as_secs_f64());
-        match result.first_token_elapsed {
-            Some(elapsed) => println!("Time to first token: {:.3}s", elapsed.as_secs_f64()),
-            None => println!("Time to first token: n/a"),
-        }
-        println!("Generation time: {:.3}s", result.generation_elapsed.as_secs_f64());
-        println!("Tokens/sec: {:.3}", result.tokens_per_second());
-        if let Some(memory) = &result.kv_cache_memory {
-            print_kv_cache_memory_report(memory);
-        }
+        print_generation_benchmark_runs("Generation", prompt_tokens, &results, &summary);
         println!("Total time: {:.3}s", total_elapsed.as_secs_f64());
-        println!("Result: {}", result.decoded_text);
+        println!("Result: {}", summary.decoded_text);
     }
     Ok(())
+}
+
+struct GenerationBenchmarkSummary {
+    decoded_text: String,
+    generated_tokens: usize,
+    first_token_elapsed: Option<DurationStats>,
+    prefill_elapsed: Option<DurationStats>,
+    decode_elapsed: Option<DurationStats>,
+    generation_elapsed: DurationStats,
+    tokens_per_second: FloatStats,
+    decode_tokens_per_second: Option<FloatStats>,
+    kv_cache_memory: Option<KvCacheMemoryReport>,
+}
+
+#[derive(Clone, Copy)]
+struct DurationStats {
+    min: std::time::Duration,
+    median: std::time::Duration,
+    max: std::time::Duration,
+}
+
+#[derive(Clone, Copy)]
+struct FloatStats {
+    min: f64,
+    median: f64,
+    max: f64,
 }
 
 struct GenerationBenchmarkResult {
@@ -277,6 +319,147 @@ fn print_generation_benchmark_result(
     if let Some(memory) = &result.kv_cache_memory {
         print_kv_cache_memory_report(memory);
     }
+}
+
+fn print_generation_benchmark_runs(
+    label: &str,
+    prompt_tokens: usize,
+    results: &[GenerationBenchmarkResult],
+    summary: &GenerationBenchmarkSummary,
+) {
+    if results.len() == 1 {
+        print_generation_benchmark_result(label, prompt_tokens, &results[0]);
+        return;
+    }
+
+    println!("{label}:");
+    println!("Generated tokens: {}", summary.generated_tokens);
+    println!("Final tokens: {}", prompt_tokens + summary.generated_tokens);
+    match summary.first_token_elapsed {
+        Some(stats) => println!("Time to first token: {}", format_duration_stats(stats)),
+        None => println!("Time to first token: n/a"),
+    }
+    if let Some(stats) = summary.prefill_elapsed {
+        println!("Prompt prefill time: {}", format_duration_stats(stats));
+    }
+    if let Some(stats) = summary.decode_elapsed {
+        println!("Decode time: {}", format_duration_stats(stats));
+    }
+    if let Some(stats) = summary.decode_tokens_per_second {
+        println!("Decode tokens/sec: {}", format_float_stats(stats));
+    }
+    println!("Generation time: {}", format_duration_stats(summary.generation_elapsed));
+    println!("Tokens/sec: {}", format_float_stats(summary.tokens_per_second));
+    if let Some(memory) = &summary.kv_cache_memory {
+        print_kv_cache_memory_report(memory);
+    }
+}
+
+fn summarize_generation_benchmark_results(
+    results: &[GenerationBenchmarkResult],
+) -> Result<GenerationBenchmarkSummary> {
+    let Some(first_result) = results.first() else {
+        return Err(MiniInferError::EmptyInput);
+    };
+
+    Ok(GenerationBenchmarkSummary {
+        decoded_text: first_result.decoded_text.clone(),
+        generated_tokens: first_result.generated_tokens,
+        first_token_elapsed: optional_duration_stats(results.iter().filter_map(|result| result.first_token_elapsed)),
+        prefill_elapsed: optional_duration_stats(results.iter().filter_map(|result| result.prefill_elapsed)),
+        decode_elapsed: optional_duration_stats(results.iter().filter_map(|result| result.decode_elapsed)),
+        generation_elapsed: duration_stats(results.iter().map(|result| result.generation_elapsed))?,
+        tokens_per_second: float_stats(results.iter().map(GenerationBenchmarkResult::tokens_per_second))?,
+        decode_tokens_per_second: optional_float_stats(
+            results
+                .iter()
+                .filter(|result| result.decode_elapsed.is_some())
+                .map(GenerationBenchmarkResult::decode_tokens_per_second),
+        ),
+        kv_cache_memory: first_result.kv_cache_memory,
+    })
+}
+
+fn comparison_outputs_match(
+    no_cache_results: &[GenerationBenchmarkResult],
+    kv_cache_results: &[GenerationBenchmarkResult],
+) -> bool {
+    no_cache_results.len() == kv_cache_results.len()
+        && no_cache_results
+            .iter()
+            .zip(kv_cache_results)
+            .all(|(no_cache, kv_cache)| no_cache.decoded_text == kv_cache.decoded_text)
+}
+
+fn optional_duration_stats(
+    values: impl Iterator<Item = std::time::Duration>,
+) -> Option<DurationStats> {
+    duration_stats(values).ok()
+}
+
+fn duration_stats(values: impl Iterator<Item = std::time::Duration>) -> Result<DurationStats> {
+    let mut values: Vec<std::time::Duration> = values.collect();
+    if values.is_empty() {
+        return Err(MiniInferError::EmptyInput);
+    }
+
+    values.sort();
+    Ok(DurationStats {
+        min: values[0],
+        median: median_duration(&values),
+        max: values[values.len() - 1],
+    })
+}
+
+fn optional_float_stats(values: impl Iterator<Item = f64>) -> Option<FloatStats> {
+    float_stats(values).ok()
+}
+
+fn float_stats(values: impl Iterator<Item = f64>) -> Result<FloatStats> {
+    let mut values: Vec<f64> = values.collect();
+    if values.is_empty() {
+        return Err(MiniInferError::EmptyInput);
+    }
+
+    values.sort_by(f64::total_cmp);
+    Ok(FloatStats {
+        min: values[0],
+        median: median_float(&values),
+        max: values[values.len() - 1],
+    })
+}
+
+fn median_duration(values: &[std::time::Duration]) -> std::time::Duration {
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        std::time::Duration::from_secs_f64(
+            (values[middle - 1].as_secs_f64() + values[middle].as_secs_f64()) / 2.0,
+        )
+    } else {
+        values[middle]
+    }
+}
+
+fn median_float(values: &[f64]) -> f64 {
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
+}
+
+fn format_duration_stats(stats: DurationStats) -> String {
+    format!(
+        "min {:.3}s / median {:.3}s / max {:.3}s",
+        stats.min.as_secs_f64(),
+        stats.median.as_secs_f64(),
+        stats.max.as_secs_f64()
+    )
+}
+
+fn format_float_stats(stats: FloatStats) -> String {
+    format!("min {:.3} / median {:.3} / max {:.3}", stats.min, stats.median, stats.max)
 }
 
 fn print_kv_cache_memory_report(memory: &KvCacheMemoryReport) {

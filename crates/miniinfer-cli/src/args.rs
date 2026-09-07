@@ -78,6 +78,8 @@ pub(crate) struct BenchGenerateArgs {
     pub backend: BackendName,
     #[arg(long, default_value_t = 1)]
     pub max_new_tokens: usize,
+    #[arg(long, default_value_t = 1)]
+    pub runs: usize,
     #[arg(long, conflicts_with = "compare_cache")]
     pub kv_cache: bool,
     #[arg(long)]

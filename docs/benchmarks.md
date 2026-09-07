@@ -20,14 +20,16 @@ Model: local GPT-2 MiniInfer artifact at models/gpt2-miniinfer
 Main cache comparison:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache
+cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache --runs 5
 ```
 
 Short smoke comparison:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hello world" --max-new-tokens 30 --compare-cache
+cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hello world" --max-new-tokens 30 --compare-cache --runs 5
 ```
+
+If `--runs` is omitted, `bench-generate` defaults to one run and prints the same single-run timing fields. When `--runs` is greater than one, timing fields are reported as min/median/max summaries.
 
 Matmul backend comparison:
 
@@ -155,7 +157,7 @@ The outputs match because the comparison uses greedy decoding. Matching output i
 
 - KV-cache reporting currently covers FP32 key/value payload bytes, not allocator overhead or total process memory.
 - Cached decode attention reads borrowed key/value cache slices directly; owned tensor readback remains for tests and inspection.
-- Results are local single-run measurements, not averaged benchmark suites.
+- Current recorded results are local measurements; use `--runs` to reduce single-run timing noise.
 - CPU frequency scaling, background load, and thermal state can affect these numbers.
 
 ## Next Measurements
@@ -164,8 +166,7 @@ Useful next benchmark improvements:
 
 ```text
 1. Add process-level memory measurements for allocator overhead and temporary tensors.
-2. Run averaged benchmark samples with min/median/max.
-3. Compare reference backend vs ndarray backend on generation, not only matmul.
-4. Add an int8 weight-only benchmark after quantization is implemented.
-5. Track prefill and decode timings across multiple prompt lengths.
+2. Compare reference backend vs ndarray backend on generation, not only matmul.
+3. Add an int8 weight-only benchmark after quantization is implemented.
+4. Track prefill and decode timings across multiple prompt lengths.
 ```

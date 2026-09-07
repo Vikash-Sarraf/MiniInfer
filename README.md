@@ -116,8 +116,10 @@ GPT-2 is not instruction-tuned. Generated text can be repetitive, inconsistent, 
 Compare no-cache and KV-cache generation:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache
+cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache --runs 5
 ```
+
+`bench-generate` defaults to one run when `--runs` is omitted. Use `--runs` above `1` to print min/median/max timing summaries.
 
 Recent local result on Windows 11 Pro with a 13th Gen Intel Core i7-13800H:
 
@@ -141,7 +143,7 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 - GPT-2 is the only implemented model architecture.
 - CPU is the only runtime target.
 - FP32 is the current weight format; int8 weight-only quantization is future work.
-- Benchmark results are currently local single-run measurements, not averaged suites.
+- Benchmark results are local measurements and can be summarized across repeated runs with `--runs`.
 - The runtime is a learning-focused engine, not a production server.
 
 ## Resume Signals

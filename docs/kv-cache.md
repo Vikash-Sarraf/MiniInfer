@@ -154,8 +154,10 @@ cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prom
 Compare cached and uncached benchmark runs:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache
+cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache --runs 5
 ```
+
+`--runs` defaults to `1` when omitted. Values above `1` report min/median/max timing summaries.
 
 ## Benchmark Result
 
@@ -208,7 +210,6 @@ Possible follow-up work:
 
 ```text
 1. Add process-level memory measurements for allocator overhead and temporary tensors.
-2. Add averaged benchmark runs with min/median/max timings.
-3. Track prefill and decode timings across multiple prompt lengths.
-4. Add prefix-cache extension after the single-prompt prefill path is fully benchmarked.
+2. Track prefill and decode timings across multiple prompt lengths.
+3. Add prefix-cache extension after the single-prompt prefill path is fully benchmarked.
 ```
