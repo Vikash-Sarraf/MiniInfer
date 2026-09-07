@@ -53,6 +53,12 @@ def parse_args() -> argparse.Namespace:
 		default="binary",
 		help="Output weight format. Binary writes weights.index.json and weights.bin.",
 	)
+	parser.add_argument(
+		"--quantization",
+		choices=["none", "int8"],
+		default="none",
+		help="Optional binary weight quantization. int8 writes mixed f32/i8_symmetric tensors.",
+	)
 	return parser.parse_args()
 
 
@@ -64,6 +70,8 @@ def main() -> None:
 
 	if source_dir.resolve() == output_dir.resolve():
 		raise SystemExit("output directory must be different from source directory")
+	if args.format != "binary" and args.quantization != "none":
+		raise SystemExit("--quantization requires --format binary")
 
 	if output_dir.exists() and not args.overwrite:
 		raise SystemExit(
@@ -100,11 +108,12 @@ def main() -> None:
 		weights = convert_weights(state, model_config)
 		write_json(output_dir / "weights.json", weights)
 	else:
-		write_binary_weights(state, model_config, output_dir)
+		write_binary_weights(state, model_config, output_dir, args.quantization)
 	copy_tokenizer_files(source_dir, output_dir)
 
 	print(f"Wrote MiniInfer model to {output_dir}")
 	print(f"Format: {args.format}")
+	print(f"Quantization: {args.quantization}")
 	print(f"Layers: {model_config['num_layers']}")
 	print(f"Vocab size: {model_config['vocab_size']}")
 	print(f"Hidden size: {model_config['hidden_size']}")
@@ -121,25 +130,38 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 		file.write("\n")
 
 
-def write_binary_weights(state: dict[str, Any], config: dict[str, Any], output_dir: Path) -> None:
+def write_binary_weights(
+	state: dict[str, Any], config: dict[str, Any], output_dir: Path, quantization: str
+) -> None:
 	index: dict[str, Any] = {
-		"format_version": 1,
-		"dtype": "f32",
+		"format_version": 2 if quantization == "int8" else 1,
 		"endianness": "little",
 		"lm_head": {"type": "tied"},
 		"tensors": {},
 	}
+	if quantization == "none":
+		index["dtype"] = "f32"
 	offset = 0
 
 	with (output_dir / "weights.bin").open("wb") as weight_file:
 		for name, tensor in iter_weight_tensors(state, config):
-			data = tensor_bytes(tensor)
 			shape = list(tensor.shape)
-			index["tensors"][name] = {
+			entry: dict[str, Any] = {
 				"shape": shape,
 				"offset_bytes": offset,
 				"len": numel(shape),
 			}
+
+			if should_quantize_tensor(name, tensor, quantization):
+				data, scale = quantized_tensor_bytes(tensor)
+				entry["dtype"] = "i8_symmetric"
+				entry["scale"] = scale
+			else:
+				data = tensor_bytes(tensor)
+				if quantization == "int8":
+					entry["dtype"] = "f32"
+
+			index["tensors"][name] = entry
 			weight_file.write(data)
 			offset += len(data)
 
@@ -347,6 +369,34 @@ def tensor_file(tensor: Any) -> dict[str, Any]:
 def tensor_bytes(tensor: Any) -> bytes:
 	array = tensor.detach().cpu().float().contiguous().numpy()
 	return array.astype("<f4", copy=False).tobytes(order="C")
+
+
+def should_quantize_tensor(name: str, tensor: Any, quantization: str) -> bool:
+	if quantization != "int8":
+		return False
+	if len(tensor.shape) != 2:
+		return False
+	return name.endswith(
+		(
+			"c_attn_weight",
+			"attn_c_proj_weight",
+			"c_fc_weight",
+			"mlp_c_proj_weight",
+		)
+	)
+
+
+def quantized_tensor_bytes(tensor: Any) -> tuple[bytes, float]:
+	array = tensor.detach().cpu().float().contiguous().numpy()
+	max_abs = float(abs(array).max())
+	if max_abs == 0.0:
+		scale = 1.0
+		quantized = array * 0
+	else:
+		scale = max_abs / 127.0
+		quantized = (array / scale).round().clip(-127, 127)
+
+	return quantized.astype("i1", copy=False).tobytes(order="C"), scale
 
 
 def numel(shape: list[int]) -> int:
