@@ -1,6 +1,6 @@
 # MiniInfer
 
-MiniInfer is a CPU-first Rust inference runtime built as a learning and resume project. The V1 target is a complete GPT-2-style decoder-only inference path that owns model conversion, model loading, tokenization, generation, sampling, streaming, KV-cache decoding, tests, and benchmarks.
+MiniInfer is a CPU-first Rust inference runtime built as a serious engineering and resume project. The V1 target is a complete GPT-2-style decoder-only inference path that owns model conversion, model loading, tokenization, generation, sampling, streaming, KV-cache decoding, tests, and benchmarks.
 
 The goal is not to wrap an existing model runner. MiniInfer keeps the full inference pipeline visible and explainable, while allowing optimized math libraries behind an explicit backend boundary.
 
@@ -15,6 +15,7 @@ The goal is not to wrap an existing model runner. MiniInfer keeps the full infer
 - CLI streaming output.
 - Per-layer KV-cache decode path with optimized full-prompt prefill for GPT-2 generation.
 - Benchmark commands for matmul, no-cache vs KV-cache generation, and KV-cache payload memory.
+- Mixed FP32/int8 binary weight artifacts with per-channel symmetric int8 scales and dequantize-on-load support.
 
 ## Repository Layout
 
@@ -83,6 +84,14 @@ tokenizer.json or tokenizer files copied from the source directory
 
 The binary weight format keeps large FP32 weights in `weights.bin` and stores tensor metadata in `weights.index.json`.
 
+Per-channel int8 artifact conversion:
+
+```powershell
+.\.venv\Scripts\python.exe tools\convert_gpt2_pytorch.py --source-dir models/gpt2 --output-dir models/gpt2-miniinfer-int8-channel --format binary --quantization int8 --overwrite
+```
+
+The int8 converter stores selected GPT-2 block matrix weights as `i8_symmetric` tensors with `scales` and `scale_axis` metadata. MiniInfer currently dequantizes those weights back to FP32 during load.
+
 ## Run Generation
 
 Greedy generation with the default ndarray backend:
@@ -123,10 +132,17 @@ cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-minii
 
 Recent local result on Windows 11 Pro with a 13th Gen Intel Core i7-13800H:
 
-| Prompt                                                     | Generated tokens | No-cache tok/s | KV-cache tok/s | Speedup | Outputs match |
-| ---------------------------------------------------------- | ---------------: | -------------: | -------------: | ------: | ------------- |
-| `Hey I bet you're wondering how I got into this situation` |               60 |          5.426 |         11.985 |  2.209x | true          |
-| `Hello world`                                              |               30 |          8.866 |         12.186 |  1.374x | true          |
+| Prompt                                                     | Runs | Generated tokens | No-cache median tok/s | KV-cache median tok/s | Median speedup | Outputs match |
+| ---------------------------------------------------------- | ---: | ---------------: | --------------------: | --------------------: | -------------: | ------------- |
+| `Hey I bet you're wondering how I got into this situation` |    5 |               60 |                 6.081 |                13.054 |         2.147x | true          |
+| `Hello world`                                              |    1 |               30 |                 8.866 |                12.186 |         1.374x | true          |
+
+Per-channel int8 artifact result:
+
+| Artifact | `weights.bin` size | Logit max abs diff | Logit mean abs diff |
+| --- | ---: | ---: | ---: |
+| FP32 | 497,759,232 bytes | n/a | n/a |
+| Per-channel int8 | 242,955,264 bytes | 0.46926117 | 0.35725098 |
 
 For GPT-2 small, the current benchmark output also reports KV-cache payload memory. A full 1024-token cache reserves `75,497,472` bytes, or `72.000 MiB`, for FP32 keys and values.
 
@@ -136,15 +152,16 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 
 - [docs/kv-cache.md](docs/kv-cache.md) explains the current KV-cache layout, decode flow, benchmark result, and limitations.
 - [docs/benchmarks.md](docs/benchmarks.md) records reproducible benchmark commands and current local results.
+- [docs/quantization.md](docs/quantization.md) explains the current int8 artifact format, dequantize-on-load path, and measured drift.
 - [.github/docs/plan.md](.github/docs/plan.md) tracks the larger V1/V1.5 roadmap.
 
 ## Current Limitations
 
 - GPT-2 is the only implemented model architecture.
 - CPU is the only runtime target.
-- FP32 is the current weight format; int8 weight-only quantization is future work.
+- Int8 weight artifacts currently dequantize to FP32 at load time; true int8 matmul is future work.
 - Benchmark results are local measurements and can be summarized across repeated runs with `--runs`.
-- The runtime is a learning-focused engine, not a production server.
+- The runtime is an inference engine, not a production server.
 
 ## Resume Signals
 
@@ -157,4 +174,5 @@ MiniInfer currently demonstrates:
 - deterministic and stochastic generation controls
 - streaming text output
 - per-layer KV-cache decode with optimized prompt prefill, benchmarked speedup, and payload memory reporting
+- per-channel int8 weight artifact compression with measured logit drift against a Hugging Face FP32 reference
 - correctness-focused tests and reproducible benchmark commands

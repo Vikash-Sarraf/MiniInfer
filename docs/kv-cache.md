@@ -168,28 +168,28 @@ Prompt tokens: 12
 Generated tokens: 60
 
 No cache:
-  Generation time: 11.057s
-  Tokens/sec: 5.426
+  Generation time: 9.867s median
+  Tokens/sec: 6.081 median
 
 KV cache:
-  Time to first token: 0.387s
-  Prompt prefill time: 0.387s
-  Decode time: 4.617s
-  Decode tokens/sec: 12.995
-  Generation time: 5.006s
-  Tokens/sec: 11.985
+  Time to first token: 0.366s median
+  Prompt prefill time: 0.365s median
+  Decode time: 4.230s median
+  Decode tokens/sec: 14.183 median
+  Generation time: 4.596s median
+  Tokens/sec: 13.054 median
   Active cache payload: 5308416 bytes (5.062 MiB)
   Allocated cache payload: 75497472 bytes (72.000 MiB)
   Capacity cache payload: 75497472 bytes (72.000 MiB)
 
 Speedup:
-  Generation time: 2.209x
-  Tokens/sec: 2.209x
+  Generation time: 2.147x
+  Tokens/sec: 2.147x
 
 Outputs match: true
 ```
 
-The matching output confirms that cached greedy generation follows the same token path as uncached greedy generation for this benchmark.
+The matching output confirms that cached greedy generation follows the same token path as uncached greedy generation for this 5-run benchmark.
 
 See [benchmarks.md](benchmarks.md) for the full benchmark command, environment details, and a second shorter cache comparison.
 

@@ -1007,7 +1007,8 @@ Do not implement advanced quantization first.
 ### 22.2 V2
 
 - FP16 loading/conversion if feasible
-- int8 weight-only quantization
+- int8 weight-only artifact compression with per-channel scales
+- true int8 weight-only matmul
 
 ### 22.3 V3
 
@@ -1458,7 +1459,7 @@ The README should include:
 The README should be honest:
 
 ```text
-MiniInfer is not intended to beat llama.cpp. It is a learning-focused but real inference runtime that demonstrates model loading, tokenization, transformer decoding, KV caching, sampling, correctness testing, benchmarking, and a practical path toward optimized kernels and model compression.
+MiniInfer is not intended to beat llama.cpp. It is a focused but real inference runtime that demonstrates model loading, tokenization, transformer decoding, KV caching, sampling, correctness testing, benchmarking, and a practical path toward optimized kernels and model compression.
 ```
 
 ---
