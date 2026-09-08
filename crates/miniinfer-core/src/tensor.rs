@@ -6,6 +6,12 @@ pub struct Tensor {
     data: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+pub enum WeightTensor {
+    F32(Tensor),
+    I8Symmetric(QuantizedTensor),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuantizationScale {
     PerTensor(f32),
@@ -20,6 +26,22 @@ pub struct QuantizedTensor {
     shape: Vec<usize>,
     data: Vec<i8>,
     scale: QuantizationScale,
+}
+
+impl WeightTensor {
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            WeightTensor::F32(tensor) => tensor.shape(),
+            WeightTensor::I8Symmetric(tensor) => tensor.shape(),
+        }
+    }
+
+    pub fn dequantize(&self) -> Result<Tensor> {
+        match self {
+            WeightTensor::F32(tensor) => Ok(tensor.clone()),
+            WeightTensor::I8Symmetric(tensor) => tensor.dequantize(),
+        }
+    }
 }
 
 impl Tensor {

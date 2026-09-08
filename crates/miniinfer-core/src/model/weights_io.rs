@@ -9,7 +9,7 @@ use crate::{
         config::ModelConfig,
         gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead},
     },
-    tensor::{QuantizationScale, QuantizedTensor, Tensor},
+    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor},
 };
 
 #[derive(Deserialize)]
@@ -230,62 +230,7 @@ fn read_binary_tensor(
     index: &BinaryWeightsIndexFile,
     name: &str,
 ) -> Result<Tensor> {
-    let tensor_index = index.tensors.get(name).ok_or_else(|| MiniInferError::InvalidConfig {
-        message: format!("weights index is missing tensor {name}"),
-    })?;
-    let expected_len: usize = tensor_index.shape.iter().product();
-    if tensor_index.len != expected_len {
-        return Err(MiniInferError::InvalidConfig {
-            message: format!(
-                "tensor {name} index length {} does not match shape product {}",
-                tensor_index.len, expected_len
-            ),
-        });
-    }
-
-    let dtype = tensor_dtype(index, tensor_index)?;
-
-    let byte_len = tensor_index
-        .len
-        .checked_mul(dtype.size_in_bytes())
-        .ok_or_else(|| MiniInferError::InvalidConfig {
-            message: format!("tensor {name} byte length overflow"),
-        })?;
-
-    let mut bytes = vec![0u8; byte_len];
-    data_file
-        .seek(SeekFrom::Start(tensor_index.offset_bytes))
-        .map_err(|error| MiniInferError::InvalidConfig {
-            message: format!("failed to seek tensor {name}: {error}"),
-        })?;
-    data_file.read_exact(&mut bytes).map_err(|error| MiniInferError::InvalidConfig {
-        message: format!("failed to read tensor {name}: {error}"),
-    })?;
-
-    match dtype {
-        DType::F32 => {
-            let mut data = Vec::with_capacity(tensor_index.len);
-            for chunk in bytes.chunks_exact(4) {
-                let mut value_bytes = [0u8; 4];
-                value_bytes.copy_from_slice(chunk);
-                data.push(f32::from_le_bytes(value_bytes));
-            }
-
-            Tensor::new(tensor_index.shape.clone(), data)
-        }
-        DType::I8Symmetric => {
-            let scale = quantization_scale(name, tensor_index)?;
-
-            let data = bytes.iter().map(|byte| *byte as i8).collect::<Vec<i8>>();
-
-            QuantizedTensor::new(
-                tensor_index.shape.clone(),
-                data,
-                scale,
-            )?
-            .dequantize()
-        }
-    }
+    read_binary_weight_tensor(data_file, index, name)?.dequantize()
 }
 
 pub(super) fn load_lm_head(
@@ -354,6 +299,68 @@ fn quantization_scale(name: &str, tensor_index: &BinaryTensorIndexFile) -> Resul
         _ => Err(MiniInferError::InvalidConfig {
             message: format!("tensor {} has invalid quantization scale configuration", name),
         }),
+    }
+}
+
+fn read_binary_weight_tensor(
+    data_file: &mut (impl Read + Seek),
+    index: &BinaryWeightsIndexFile,
+    name: &str,
+) -> Result<WeightTensor> {
+    let tensor_index = index.tensors.get(name).ok_or_else(|| MiniInferError::InvalidConfig {
+        message: format!("weights index is missing tensor {name}"),
+    })?;
+    let expected_len: usize = tensor_index.shape.iter().product();
+    if tensor_index.len != expected_len {
+        return Err(MiniInferError::InvalidConfig {
+            message: format!(
+                "tensor {name} index length {} does not match shape product {}",
+                tensor_index.len, expected_len
+            ),
+        });
+    }
+
+    let dtype = tensor_dtype(index, tensor_index)?;
+
+    let byte_len = tensor_index
+        .len
+        .checked_mul(dtype.size_in_bytes())
+        .ok_or_else(|| MiniInferError::InvalidConfig {
+            message: format!("tensor {name} byte length overflow"),
+        })?;
+
+    let mut bytes = vec![0u8; byte_len];
+    data_file
+        .seek(SeekFrom::Start(tensor_index.offset_bytes))
+        .map_err(|error| MiniInferError::InvalidConfig {
+            message: format!("failed to seek tensor {name}: {error}"),
+        })?;
+    data_file.read_exact(&mut bytes).map_err(|error| MiniInferError::InvalidConfig {
+        message: format!("failed to read tensor {name}: {error}"),
+    })?;
+
+    match dtype {
+        DType::F32 => {
+            let mut data = Vec::with_capacity(tensor_index.len);
+            for chunk in bytes.chunks_exact(4) {
+                let mut value_bytes = [0u8; 4];
+                value_bytes.copy_from_slice(chunk);
+                data.push(f32::from_le_bytes(value_bytes));
+            }
+
+            Ok(WeightTensor::F32(Tensor::new(tensor_index.shape.clone(), data)?))
+        }
+        DType::I8Symmetric => {
+            let scale = quantization_scale(name, tensor_index)?;
+
+            let data = bytes.iter().map(|byte| *byte as i8).collect::<Vec<i8>>();
+
+            Ok(WeightTensor::I8Symmetric(QuantizedTensor::new(
+                tensor_index.shape.clone(),
+                data,
+                scale,
+            )?))
+        }
     }
 }
 
