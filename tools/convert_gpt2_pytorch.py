@@ -156,7 +156,7 @@ def write_binary_weights(
 				data, scales, axis = quantized_tensor_bytes(tensor)
 				entry["dtype"] = "i8_symmetric"
 				entry["scales"] = scales
-				entry["scale-axis"] = axis
+				entry["scale_axis"] = axis
 
 			else:
 				data = tensor_bytes(tensor)
