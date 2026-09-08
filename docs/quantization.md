@@ -12,7 +12,7 @@ Quantized artifacts use `weights.index.json` format version 2 with per-tensor dt
 {
   "format_version": 2,
   "endianness": "little",
-  "lm_head": {"type": "tied"},
+  "lm_head": { "type": "tied" },
   "tensors": {
     "blocks.0.c_attn_weight": {
       "shape": [768, 2304],
@@ -75,20 +75,20 @@ Compare logits against Hugging Face FP32:
 
 Local GPT-2 small artifact size comparison:
 
-| Artifact | `weights.bin` size | Reduction |
-| --- | ---: | ---: |
-| FP32 | 497,759,232 bytes | 1.00x |
-| Per-channel int8 | 242,955,264 bytes | 2.05x |
+| Artifact         | `weights.bin` size | Reduction |
+| ---------------- | -----------------: | --------: |
+| FP32             |  497,759,232 bytes |     1.00x |
+| Per-channel int8 |  242,955,264 bytes |     2.05x |
 
 Logit drift for prompt `Hello world`, comparing MiniInfer per-channel int8 against Hugging Face FP32 for the top 10 Hugging Face logits:
 
-| Metric | Value |
-| --- | ---: |
-| Compared tokens | 10 |
-| Max absolute difference | 0.46926117 |
+| Metric                   |      Value |
+| ------------------------ | ---------: |
+| Compared tokens          |         10 |
+| Max absolute difference  | 0.46926117 |
 | Mean absolute difference | 0.35725098 |
-| Tolerance | 1.00000000 |
-| Status | PASS |
+| Tolerance                | 1.00000000 |
+| Status                   |       PASS |
 
 Per-channel scales significantly improve over the earlier per-tensor int8 checkpoint, which measured approximately `4.8978` max absolute difference and `3.942` mean absolute difference on the same prompt.
 

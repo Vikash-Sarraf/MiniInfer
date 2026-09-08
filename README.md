@@ -139,10 +139,10 @@ Recent local result on Windows 11 Pro with a 13th Gen Intel Core i7-13800H:
 
 Per-channel int8 artifact result:
 
-| Artifact | `weights.bin` size | Logit max abs diff | Logit mean abs diff |
-| --- | ---: | ---: | ---: |
-| FP32 | 497,759,232 bytes | n/a | n/a |
-| Per-channel int8 | 242,955,264 bytes | 0.46926117 | 0.35725098 |
+| Artifact         | `weights.bin` size | Logit max abs diff | Logit mean abs diff |
+| ---------------- | -----------------: | -----------------: | ------------------: |
+| FP32             |  497,759,232 bytes |                n/a |                 n/a |
+| Per-channel int8 |  242,955,264 bytes |         0.46926117 |          0.35725098 |
 
 For GPT-2 small, the current benchmark output also reports KV-cache payload memory. A full 1024-token cache reserves `75,497,472` bytes, or `72.000 MiB`, for FP32 keys and values.
 

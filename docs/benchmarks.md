@@ -48,19 +48,19 @@ cargo run --release -p miniinfer-cli -- bench-matmul
 
 Per-channel int8 conversion stores selected GPT-2 block matrix weights as `i8_symmetric` tensors with one scale per output column, then dequantizes them to FP32 during model load.
 
-| Artifact | `weights.bin` size | Reduction |
-| --- | ---: | ---: |
-| FP32 | 497,759,232 bytes | 1.00x |
-| Per-channel int8 | 242,955,264 bytes | 2.05x |
+| Artifact         | `weights.bin` size | Reduction |
+| ---------------- | -----------------: | --------: |
+| FP32             |  497,759,232 bytes |     1.00x |
+| Per-channel int8 |  242,955,264 bytes |     2.05x |
 
 Logit drift for prompt `Hello world`, comparing MiniInfer per-channel int8 against Hugging Face FP32 for the top 10 Hugging Face logits:
 
-| Metric | Value |
-| --- | ---: |
-| Max absolute difference | 0.46926117 |
+| Metric                   |      Value |
+| ------------------------ | ---------: |
+| Max absolute difference  | 0.46926117 |
 | Mean absolute difference | 0.35725098 |
-| Tolerance | 1.00000000 |
-| Status | PASS |
+| Tolerance                | 1.00000000 |
+| Status                   |       PASS |
 
 | Prompt                                                     | Active cache payload | Allocated cache payload | Capacity cache payload |
 | ---------------------------------------------------------- | -------------------: | ----------------------: | ---------------------: |
@@ -71,10 +71,10 @@ The cache memory numbers are FP32 key/value payload bytes, not whole-process hea
 
 ## Time to First Token
 
-| Prompt                                                     | No-cache TTFT | KV-cache TTFT | Note                                                       |
-| ---------------------------------------------------------- | ------------: | ------------: | ---------------------------------------------------------- |
-| `Hey I bet you're wondering how I got into this situation` |        0.090s |        0.366s | 5-run median                                               |
-| `Hello world`                                              |        0.085s |        0.100s | Short prompts have very little prefill work either way.    |
+| Prompt                                                     | No-cache TTFT | KV-cache TTFT | Note                                                    |
+| ---------------------------------------------------------- | ------------: | ------------: | ------------------------------------------------------- |
+| `Hey I bet you're wondering how I got into this situation` |        0.090s |        0.366s | 5-run median                                            |
+| `Hello world`                                              |        0.085s |        0.100s | Short prompts have very little prefill work either way. |
 
 The current KV-cache implementation uses optimized full-prompt prefill, then one-token cached decode for generated tokens. KV-cache TTFT can still be higher than the no-cache first step because it fills the whole prompt cache up front, but the gap is much smaller than the earlier token-by-token prefill path.
 
