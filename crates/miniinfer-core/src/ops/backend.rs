@@ -1,4 +1,8 @@
-use crate::{error::{MiniInferError, Result}, ops::{helper, matmul, softmax}, tensor::{Tensor, WeightTensor}};
+use crate::{
+    error::{MiniInferError, Result},
+    ops::{helper, matmul, softmax},
+    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor},
+};
 use ndarray::ArrayView2;
 
 pub trait OpsBackend {
@@ -92,7 +96,10 @@ impl OpsBackend for ReferenceBackend {
     }
 
     fn matmul_weight(&self, a: &Tensor, b: &WeightTensor) -> Result<Tensor> {
-        self.matmul(a, &b.dequantize()?)
+        match b {
+            WeightTensor::F32(weight) => self.matmul(a, weight),
+            WeightTensor::I8Symmetric(weight) => matmul_i8_symmetric_weight(a, weight),
+        }
     }
 }
 
@@ -115,7 +122,7 @@ impl OpsBackend for NdArrayBackend {
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-       let (m, k, n) = helper::validate_matmul_shape(a, b)?;
+        let (m, k, n) = helper::validate_matmul_shape(a, b)?;
 
         let a_view = ArrayView2::from_shape((m, k), a.data()).expect("shape should be validated");
         let b_view = ArrayView2::from_shape((k, n), b.data()).expect("shape should be validated");
@@ -124,7 +131,6 @@ impl OpsBackend for NdArrayBackend {
         let data = output.iter().copied().collect();
 
         Tensor::new(vec![m, n], data)
-
     }
 
     fn matmul_row_by_matrix(
@@ -143,17 +149,96 @@ impl OpsBackend for NdArrayBackend {
         Ok(output.iter().copied().collect())
     }
 
-    fn softmax(&self, value: &[f32]) -> Result<Vec<f32>> { 
-        softmax::softmax(value)    
+    fn softmax(&self, value: &[f32]) -> Result<Vec<f32>> {
+        softmax::softmax(value)
     }
-    
+
     fn matmul_weight(&self, a: &Tensor, b: &WeightTensor) -> Result<Tensor> {
-        self.matmul(a, &b.dequantize()?)
+        match b {
+            WeightTensor::F32(weight) => self.matmul(a, weight),
+            WeightTensor::I8Symmetric(weight) => self.matmul(a, &weight.dequantize()?),
+        }
     }
 }
 
+fn quantized_weight_value(
+    data: &[i8],
+    cols: usize,
+    row: usize,
+    col: usize,
+    scale: &QuantizationScale,
+) -> f32 {
+    let value = data[row * cols + col] as f32;
+    let scale = match scale {
+        QuantizationScale::PerTensor(scale) => *scale,
+        QuantizationScale::PerAxis { axis, scales } => match *axis {
+            0 => scales[row],
+            1 => scales[col],
+            _ => unreachable!("quantized tensor validation rejects invalid scale axes"),
+        },
+    };
+
+    value * scale
+}
+
+fn matmul_i8_symmetric_weight(
+    a: &Tensor,
+    b: &QuantizedTensor,
+) -> Result<Tensor> {
+    if a.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: a.shape().len(),
+        });
+    }
+
+    if b.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: b.shape().len(),
+        });
+    }
+
+    let a_rows = a.shape()[0];
+    let a_cols = a.shape()[1];
+    let b_rows = b.shape()[0];
+    let b_cols = b.shape()[1];
+
+    if a_cols != b_rows {
+        return Err(MiniInferError::InvalidTensorShape {
+            expected: vec![a_cols],
+            actual: vec![b_rows],
+        });
+    }
+
+    let mut output = vec![0.0; a_rows * b_cols];
+
+    for row in 0..a_rows {
+        for col in 0..b_cols {
+            let mut sum = 0.0;
+
+            for inner in 0..a_cols {
+                let lhs = a.data()[row * a_cols + inner];
+                let rhs = quantized_weight_value(
+                    b.data(),
+                    b_cols,
+                    inner,
+                    col,
+                    b.scale(),
+                );
+
+                sum += lhs * rhs;
+            }
+
+            output[row * b_cols + col] = sum;
+        }
+    }
+
+    Tensor::new(vec![a_rows, b_cols], output)
+}
+
 #[cfg(test)]
-    mod tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -184,6 +269,47 @@ impl OpsBackend for NdArrayBackend {
 
         assert_eq!(c.shape(), &[2, 2]);
         assert_eq!(c.data(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn reference_backend_matmul_weight_i8_symmetric_per_tensor() {
+        let backend = ReferenceBackend::new();
+        let input = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).expect("valid input");
+        let weight = QuantizedTensor::new(
+            vec![2, 2],
+            vec![2, -1, 0, 3],
+            QuantizationScale::PerTensor(0.5),
+        )
+        .expect("valid quantized weight");
+
+        let output = backend
+            .matmul_weight(&input, &WeightTensor::I8Symmetric(weight))
+            .expect("quantized matmul should succeed");
+
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(output.data(), &[1.0, 2.5, 3.0, 4.5]);
+    }
+
+    #[test]
+    fn reference_backend_matmul_weight_i8_symmetric_per_column() {
+        let backend = ReferenceBackend::new();
+        let input = Tensor::new(vec![1, 2], vec![2.0, 3.0]).expect("valid input");
+        let weight = QuantizedTensor::new(
+            vec![2, 2],
+            vec![1, 2, 3, 4],
+            QuantizationScale::PerAxis {
+                axis: 1,
+                scales: vec![0.5, 0.25],
+            },
+        )
+        .expect("valid quantized weight");
+
+        let output = backend
+            .matmul_weight(&input, &WeightTensor::I8Symmetric(weight))
+            .expect("quantized matmul should succeed");
+
+        assert_eq!(output.shape(), &[1, 2]);
+        assert_eq!(output.data(), &[5.5, 4.0]);
     }
 
     #[test]

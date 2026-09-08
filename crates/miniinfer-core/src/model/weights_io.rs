@@ -156,15 +156,15 @@ pub fn load_gpt2_binary_weights(
         blocks.push(Gpt2BlockWeights {
             ln_1_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_weight"))?,
             ln_1_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_bias"))?,
-            c_attn_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?,
+            c_attn_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?.into(),
             c_attn_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_bias"))?,
-            attn_c_proj_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?,
+            attn_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?.into(),
             attn_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_bias"))?,
             ln_2_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_weight"))?,
             ln_2_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_bias"))?,
-            c_fc_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?,
+            c_fc_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?.into(),
             c_fc_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_bias"))?,
-            mlp_c_proj_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?,
+            mlp_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?.into(),
             mlp_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_bias"))?,
         });
     }
