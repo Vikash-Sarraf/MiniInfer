@@ -44,6 +44,18 @@ impl WeightTensor {
     }
 }
 
+impl From<Tensor> for WeightTensor {
+    fn from(tensor: Tensor) -> Self {
+        WeightTensor::F32(tensor)
+    }
+}
+
+impl From<QuantizedTensor> for WeightTensor {
+    fn from(tensor: QuantizedTensor) -> Self {
+        WeightTensor::I8Symmetric(tensor)
+    }
+}
+
 impl Tensor {
     pub fn new(shape: Vec<usize>, data: Vec<f32>) -> Result<Self> {
         if shape.is_empty() {

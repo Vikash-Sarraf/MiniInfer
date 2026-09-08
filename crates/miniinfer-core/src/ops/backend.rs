@@ -1,4 +1,4 @@
-use crate::{error::{MiniInferError, Result}, ops::{matmul, softmax, helper}, tensor::Tensor};
+use crate::{error::{MiniInferError, Result}, ops::{helper, matmul, softmax}, tensor::{Tensor, WeightTensor}};
 use ndarray::ArrayView2;
 
 pub trait OpsBackend {
@@ -15,6 +15,8 @@ pub trait OpsBackend {
     ) -> Result<Vec<f32>>;
 
     fn softmax(&self, value: &[f32]) -> Result<Vec<f32>>;
+
+    fn matmul_weight(&self, a: &Tensor, b: &WeightTensor) -> Result<Tensor>;
 }
 
 fn validate_row_matrix_shape(
@@ -88,6 +90,10 @@ impl OpsBackend for ReferenceBackend {
     fn softmax(&self, value: &[f32]) -> Result<Vec<f32>> {
         softmax::softmax(value)
     }
+
+    fn matmul_weight(&self, a: &Tensor, b: &WeightTensor) -> Result<Tensor> {
+        self.matmul(a, &b.dequantize()?)
+    }
 }
 
 pub struct NdArrayBackend;
@@ -141,6 +147,9 @@ impl OpsBackend for NdArrayBackend {
         softmax::softmax(value)    
     }
     
+    fn matmul_weight(&self, a: &Tensor, b: &WeightTensor) -> Result<Tensor> {
+        self.matmul(a, &b.dequantize()?)
+    }
 }
 
 #[cfg(test)]

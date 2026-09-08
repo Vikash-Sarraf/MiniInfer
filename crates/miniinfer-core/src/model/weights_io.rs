@@ -104,15 +104,15 @@ pub fn load_gpt2_weights(path: impl AsRef<Path>) -> Result<Gpt2Weights> {
         blocks.push(Gpt2BlockWeights {
             ln_1_weight: tensor_from_file(block.ln_1_weight)?,
             ln_1_bias: tensor_from_file(block.ln_1_bias)?,
-            c_attn_weight: tensor_from_file(block.c_attn_weight)?,
+            c_attn_weight: weight_tensor_from_file(block.c_attn_weight)?,
             c_attn_bias: tensor_from_file(block.c_attn_bias)?,
-            attn_c_proj_weight: tensor_from_file(block.attn_c_proj_weight)?,
+            attn_c_proj_weight: weight_tensor_from_file(block.attn_c_proj_weight)?,
             attn_c_proj_bias: tensor_from_file(block.attn_c_proj_bias)?,
             ln_2_weight: tensor_from_file(block.ln_2_weight)?,
             ln_2_bias: tensor_from_file(block.ln_2_bias)?,
-            c_fc_weight: tensor_from_file(block.c_fc_weight)?,
+            c_fc_weight: weight_tensor_from_file(block.c_fc_weight)?,
             c_fc_bias: tensor_from_file(block.c_fc_bias)?,
-            mlp_c_proj_weight: tensor_from_file(block.mlp_c_proj_weight)?,
+            mlp_c_proj_weight: weight_tensor_from_file(block.mlp_c_proj_weight)?,
             mlp_c_proj_bias: tensor_from_file(block.mlp_c_proj_bias)?,
         });
     }
@@ -156,15 +156,15 @@ pub fn load_gpt2_binary_weights(
         blocks.push(Gpt2BlockWeights {
             ln_1_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_weight"))?,
             ln_1_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_bias"))?,
-            c_attn_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?,
+            c_attn_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?,
             c_attn_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_bias"))?,
-            attn_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?,
+            attn_c_proj_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?,
             attn_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_bias"))?,
             ln_2_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_weight"))?,
             ln_2_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_bias"))?,
-            c_fc_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?,
+            c_fc_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?,
             c_fc_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_bias"))?,
-            mlp_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?,
+            mlp_c_proj_weight: read_binary_weight_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?,
             mlp_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_bias"))?,
         });
     }
@@ -260,6 +260,10 @@ pub(super) fn load_lm_head(
 
 fn tensor_from_file(tensor: TensorFile) -> Result<Tensor> {
     Tensor::new(tensor.shape, tensor.data)
+}
+
+fn weight_tensor_from_file(tensor: TensorFile) -> Result<WeightTensor> {
+    Ok(WeightTensor::F32(tensor_from_file(tensor)?))
 }
 
 fn tensor_dtype(index: &BinaryWeightsIndexFile, tensor: &BinaryTensorIndexFile) -> Result<DType> {

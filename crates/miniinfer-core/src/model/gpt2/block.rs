@@ -1,4 +1,4 @@
-use super::validate_shape;
+use super::{validate_shape, validate_weight_shape};
 use crate::{
     error::{MiniInferError, Result},
     ops::{
@@ -6,26 +6,26 @@ use crate::{
         gelu, layer_norm, softmax, vector_add,
     },
     runtime::kv_cache::LayerKvCache,
-    tensor::Tensor,
+    tensor::{Tensor, WeightTensor},
 };
 
 pub struct Gpt2BlockWeights {
     pub ln_1_weight: Tensor,
     pub ln_1_bias: Tensor,
 
-    pub c_attn_weight: Tensor,
+    pub c_attn_weight: WeightTensor,
     pub c_attn_bias: Tensor,
 
-    pub attn_c_proj_weight: Tensor,
+    pub attn_c_proj_weight: WeightTensor,
     pub attn_c_proj_bias: Tensor,
 
     pub ln_2_weight: Tensor,
     pub ln_2_bias: Tensor,
 
-    pub c_fc_weight: Tensor,
+    pub c_fc_weight: WeightTensor,
     pub c_fc_bias: Tensor,
 
-    pub mlp_c_proj_weight: Tensor,
+    pub mlp_c_proj_weight: WeightTensor,
     pub mlp_c_proj_bias: Tensor,
 }
 
@@ -54,10 +54,10 @@ impl Gpt2BlockWeights {
         let seq_len = hidden.shape()[0];
         let hidden_size = hidden.shape()[1];
 
-        validate_shape(&self.c_attn_weight, &[hidden_size, 3 * hidden_size])?;
+        validate_weight_shape(&self.c_attn_weight, &[hidden_size, 3 * hidden_size])?;
         validate_shape(&self.c_attn_bias, &[3 * hidden_size])?;
 
-        let projected = backend.matmul(hidden, &self.c_attn_weight)?;
+        let projected = backend.matmul_weight(hidden, &self.c_attn_weight)?;
 
         let mut output = Vec::with_capacity(seq_len * 3 * hidden_size);
 
@@ -154,10 +154,10 @@ impl Gpt2BlockWeights {
         let seq_len = context.shape()[0];
         let hidden_size = context.shape()[1];
 
-        validate_shape(&self.attn_c_proj_weight, &[hidden_size, hidden_size])?;
+        validate_weight_shape(&self.attn_c_proj_weight, &[hidden_size, hidden_size])?;
         validate_shape(&self.attn_c_proj_bias, &[hidden_size])?;
 
-        let projected = backend.matmul(context, &self.attn_c_proj_weight)?;
+        let projected = backend.matmul_weight(context, &self.attn_c_proj_weight)?;
         let mut projected_with_bias = Vec::with_capacity(seq_len * hidden_size);
 
         for row in 0..seq_len {
@@ -189,22 +189,22 @@ impl Gpt2BlockWeights {
         let seq_len = hidden.shape()[0];
         let hidden_size = hidden.shape()[1];
 
-        validate_shape(&self.c_fc_weight, &[hidden_size, self.c_fc_bias.shape()[0]])?;
+        validate_weight_shape(&self.c_fc_weight, &[hidden_size, self.c_fc_bias.shape()[0]])?;
 
         let intermediate_size = self.c_fc_bias.shape()[0];
 
         validate_shape(&self.c_fc_bias, &[intermediate_size])?;
-        validate_shape(&self.mlp_c_proj_weight, &[intermediate_size, hidden_size])?;
+        validate_weight_shape(&self.mlp_c_proj_weight, &[intermediate_size, hidden_size])?;
         validate_shape(&self.mlp_c_proj_bias, &[hidden_size])?;
 
-        let expanded = backend.matmul(hidden, &self.c_fc_weight)?;
+        let expanded = backend.matmul_weight(hidden, &self.c_fc_weight)?;
         let expanded_data = add_bias_rows(&expanded, &self.c_fc_bias)?;
         let expanded = Tensor::new(vec![seq_len, intermediate_size], expanded_data)?;
 
         let activated_data = gelu::gelu(expanded.data())?;
         let activated = Tensor::new(vec![seq_len, intermediate_size], activated_data)?;
 
-        let projected = backend.matmul(&activated, &self.mlp_c_proj_weight)?;
+        let projected = backend.matmul_weight(&activated, &self.mlp_c_proj_weight)?;
         let projected_data = add_bias_rows(&projected, &self.mlp_c_proj_bias)?;
 
         Tensor::new(vec![seq_len, hidden_size], projected_data)
@@ -750,19 +750,23 @@ mod tests {
         Tensor::new(shape.to_vec(), vec![0.0; len]).expect("test tensor shape should be valid")
     }
 
+    fn weight(shape: &[usize]) -> WeightTensor {
+        tensor(shape).into()
+    }
+
     fn tiny_block_weights() -> Gpt2BlockWeights {
         Gpt2BlockWeights {
             ln_1_weight: tensor(&[4]),
             ln_1_bias: tensor(&[4]),
-            c_attn_weight: tensor(&[4, 12]),
+            c_attn_weight: weight(&[4, 12]),
             c_attn_bias: tensor(&[12]),
-            attn_c_proj_weight: tensor(&[4, 4]),
+            attn_c_proj_weight: weight(&[4, 4]),
             attn_c_proj_bias: tensor(&[4]),
             ln_2_weight: tensor(&[4]),
             ln_2_bias: tensor(&[4]),
-            c_fc_weight: tensor(&[4, 16]),
+            c_fc_weight: weight(&[4, 16]),
             c_fc_bias: tensor(&[16]),
-            mlp_c_proj_weight: tensor(&[16, 4]),
+            mlp_c_proj_weight: weight(&[16, 4]),
             mlp_c_proj_bias: tensor(&[4]),
         }
     }
@@ -772,15 +776,15 @@ mod tests {
         let block = Gpt2BlockWeights {
             ln_1_weight: Tensor::new(vec![3], vec![1.0, 1.0, 1.0]).expect("valid ln_1 weight"),
             ln_1_bias: Tensor::new(vec![3], vec![0.0, 0.0, 0.0]).expect("valid ln_1 bias"),
-            c_attn_weight: tensor(&[3, 9]),
+            c_attn_weight: weight(&[3, 9]),
             c_attn_bias: tensor(&[9]),
-            attn_c_proj_weight: tensor(&[3, 3]),
+            attn_c_proj_weight: weight(&[3, 3]),
             attn_c_proj_bias: tensor(&[3]),
             ln_2_weight: tensor(&[3]),
             ln_2_bias: tensor(&[3]),
-            c_fc_weight: tensor(&[3, 12]),
+            c_fc_weight: weight(&[3, 12]),
             c_fc_bias: tensor(&[12]),
-            mlp_c_proj_weight: tensor(&[12, 3]),
+            mlp_c_proj_weight: weight(&[12, 3]),
             mlp_c_proj_bias: tensor(&[3]),
         };
         let hidden = Tensor::new(vec![1, 3], vec![1.0, 2.0, 3.0]).expect("valid hidden");
@@ -812,7 +816,8 @@ mod tests {
                     0.0, 0.0, 0.0, 0.0,
                 ],
             )
-            .expect("valid c_attn weight"),
+            .expect("valid c_attn weight")
+            .into(),
             c_attn_bias: Tensor::new(vec![12], vec![0.0; 12]).expect("valid c_attn bias"),
             ..tiny_block_weights()
         };
@@ -861,16 +866,17 @@ mod tests {
                 vec![2, 6],
                 vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0],
             )
-            .expect("valid c_attn weight"),
+            .expect("valid c_attn weight")
+            .into(),
             c_attn_bias: Tensor::new(vec![6], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                 .expect("valid c_attn bias"),
-            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_weight: weight(&[2, 2]),
             attn_c_proj_bias: tensor(&[2]),
             ln_2_weight: tensor(&[2]),
             ln_2_bias: tensor(&[2]),
-            c_fc_weight: tensor(&[2, 8]),
+            c_fc_weight: weight(&[2, 8]),
             c_fc_bias: tensor(&[8]),
-            mlp_c_proj_weight: tensor(&[8, 2]),
+            mlp_c_proj_weight: weight(&[8, 2]),
             mlp_c_proj_bias: tensor(&[2]),
         };
         let hidden = Tensor::new(vec![1, 2], vec![1.0, 2.0]).expect("valid hidden");
@@ -1049,17 +1055,19 @@ mod tests {
                     0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
                 ],
             )
-            .expect("valid c_attn weight"),
+            .expect("valid c_attn weight")
+            .into(),
             c_attn_bias: Tensor::new(vec![6], vec![0.0; 6]).expect("valid c_attn bias"),
             attn_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
-                .expect("valid attention projection weight"),
+                .expect("valid attention projection weight")
+                .into(),
             attn_c_proj_bias: Tensor::new(vec![2], vec![0.0, 0.0])
                 .expect("valid attention projection bias"),
             ln_2_weight: tensor(&[2]),
             ln_2_bias: tensor(&[2]),
-            c_fc_weight: tensor(&[2, 8]),
+            c_fc_weight: weight(&[2, 8]),
             c_fc_bias: tensor(&[8]),
-            mlp_c_proj_weight: tensor(&[8, 2]),
+            mlp_c_proj_weight: weight(&[8, 2]),
             mlp_c_proj_bias: tensor(&[2]),
         };
         let hidden = Tensor::new(vec![2, 2], vec![10.0, 20.0, 30.0, 40.0]).expect("valid hidden");
@@ -1091,15 +1099,16 @@ mod tests {
                     0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
                 ],
             )
-            .expect("valid c_attn weight"),
+            .expect("valid c_attn weight")
+            .into(),
             c_attn_bias: Tensor::new(vec![6], vec![0.0; 6]).expect("valid c_attn bias"),
-            attn_c_proj_weight: tensor(&[2, 3]),
+            attn_c_proj_weight: weight(&[2, 3]),
             attn_c_proj_bias: tensor(&[2]),
             ln_2_weight: tensor(&[2]),
             ln_2_bias: tensor(&[2]),
-            c_fc_weight: tensor(&[2, 8]),
+            c_fc_weight: weight(&[2, 8]),
             c_fc_bias: tensor(&[8]),
-            mlp_c_proj_weight: tensor(&[8, 2]),
+            mlp_c_proj_weight: weight(&[8, 2]),
             mlp_c_proj_bias: tensor(&[2]),
         };
         let hidden = Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).expect("valid hidden");
@@ -1150,17 +1159,19 @@ mod tests {
         let block = Gpt2BlockWeights {
             ln_1_weight: tensor(&[2]),
             ln_1_bias: tensor(&[2]),
-            c_attn_weight: tensor(&[2, 6]),
+            c_attn_weight: weight(&[2, 6]),
             c_attn_bias: tensor(&[6]),
-            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_weight: weight(&[2, 2]),
             attn_c_proj_bias: tensor(&[2]),
             ln_2_weight: tensor(&[2]),
             ln_2_bias: tensor(&[2]),
             c_fc_weight: Tensor::new(vec![2, 2], vec![0.0, 0.0, 0.0, 0.0])
-                .expect("valid mlp expansion weight"),
+                .expect("valid mlp expansion weight")
+                .into(),
             c_fc_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid mlp expansion bias"),
             mlp_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
-                .expect("valid mlp projection weight"),
+                .expect("valid mlp projection weight")
+                .into(),
             mlp_c_proj_bias: Tensor::new(vec![2], vec![0.5, -0.5])
                 .expect("valid mlp projection bias"),
         };
@@ -1177,17 +1188,19 @@ mod tests {
         let block = Gpt2BlockWeights {
             ln_1_weight: tensor(&[2]),
             ln_1_bias: tensor(&[2]),
-            c_attn_weight: tensor(&[2, 6]),
+            c_attn_weight: weight(&[2, 6]),
             c_attn_bias: tensor(&[6]),
-            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_weight: weight(&[2, 2]),
             attn_c_proj_bias: tensor(&[2]),
             ln_2_weight: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid ln_2 weight"),
             ln_2_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid ln_2 bias"),
             c_fc_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
-                .expect("valid mlp expansion weight"),
+                .expect("valid mlp expansion weight")
+                .into(),
             c_fc_bias: Tensor::new(vec![2], vec![0.0, 0.0]).expect("valid mlp expansion bias"),
             mlp_c_proj_weight: Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0])
-                .expect("valid mlp projection weight"),
+                .expect("valid mlp projection weight")
+                .into(),
             mlp_c_proj_bias: Tensor::new(vec![2], vec![0.0, 0.0])
                 .expect("valid mlp projection bias"),
         };
@@ -1206,15 +1219,15 @@ mod tests {
         let block = Gpt2BlockWeights {
             ln_1_weight: tensor(&[2]),
             ln_1_bias: tensor(&[2]),
-            c_attn_weight: tensor(&[2, 6]),
+            c_attn_weight: weight(&[2, 6]),
             c_attn_bias: tensor(&[6]),
-            attn_c_proj_weight: tensor(&[2, 2]),
+            attn_c_proj_weight: weight(&[2, 2]),
             attn_c_proj_bias: tensor(&[2]),
             ln_2_weight: tensor(&[2]),
             ln_2_bias: tensor(&[2]),
-            c_fc_weight: tensor(&[2, 2]),
+            c_fc_weight: weight(&[2, 2]),
             c_fc_bias: tensor(&[2]),
-            mlp_c_proj_weight: tensor(&[2, 2]),
+            mlp_c_proj_weight: weight(&[2, 2]),
             mlp_c_proj_bias: tensor(&[2]),
         };
         let hidden = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).expect("valid hidden");

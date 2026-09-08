@@ -9,7 +9,7 @@ use crate::{
     tensor::Tensor,
 };
 
-use super::{validate_shape, Gpt2BlockWeights};
+use super::{validate_shape, validate_weight_shape, Gpt2BlockWeights};
 
 pub struct Gpt2Weights {
     pub wte: Tensor,
@@ -51,19 +51,19 @@ impl Gpt2Weights {
             validate_shape(&block.ln_1_weight, &[config.hidden_size])?;
             validate_shape(&block.ln_1_bias, &[config.hidden_size])?;
 
-            validate_shape(&block.c_attn_weight, &[config.hidden_size, 3 * config.hidden_size])?;
+            validate_weight_shape(&block.c_attn_weight, &[config.hidden_size, 3 * config.hidden_size])?;
             validate_shape(&block.c_attn_bias, &[3 * config.hidden_size])?;
 
-            validate_shape(&block.attn_c_proj_weight, &[config.hidden_size, config.hidden_size])?;
+            validate_weight_shape(&block.attn_c_proj_weight, &[config.hidden_size, config.hidden_size])?;
             validate_shape(&block.attn_c_proj_bias, &[config.hidden_size])?;
 
             validate_shape(&block.ln_2_weight, &[config.hidden_size])?;
             validate_shape(&block.ln_2_bias, &[config.hidden_size])?;
 
-            validate_shape(&block.c_fc_weight, &[config.hidden_size, config.intermediate_size])?;
+            validate_weight_shape(&block.c_fc_weight, &[config.hidden_size, config.intermediate_size])?;
             validate_shape(&block.c_fc_bias, &[config.intermediate_size])?;
 
-            validate_shape(&block.mlp_c_proj_weight, &[config.intermediate_size, config.hidden_size])?;
+            validate_weight_shape(&block.mlp_c_proj_weight, &[config.intermediate_size, config.hidden_size])?;
             validate_shape(&block.mlp_c_proj_bias, &[config.hidden_size])?;
         }
         Ok(())
@@ -330,10 +330,15 @@ fn project_tied_lm_head(hidden: &Tensor, wte: &Tensor) -> Result<Tensor> {
 mod tests {
     use super::*;
     use crate::model::config::Architecture;
+    use crate::tensor::WeightTensor;
 
     fn tensor(shape: &[usize]) -> Tensor {
         let len = shape.iter().product();
         Tensor::new(shape.to_vec(), vec![0.0; len]).expect("test tensor shape should be valid")
+    }
+
+    fn weight(shape: &[usize]) -> WeightTensor {
+        tensor(shape).into()
     }
 
     fn tiny_config() -> ModelConfig {
@@ -354,15 +359,15 @@ mod tests {
         Gpt2BlockWeights {
             ln_1_weight: tensor(&[4]),
             ln_1_bias: tensor(&[4]),
-            c_attn_weight: tensor(&[4, 12]),
+            c_attn_weight: weight(&[4, 12]),
             c_attn_bias: tensor(&[12]),
-            attn_c_proj_weight: tensor(&[4, 4]),
+            attn_c_proj_weight: weight(&[4, 4]),
             attn_c_proj_bias: tensor(&[4]),
             ln_2_weight: tensor(&[4]),
             ln_2_bias: tensor(&[4]),
-            c_fc_weight: tensor(&[4, 16]),
+            c_fc_weight: weight(&[4, 16]),
             c_fc_bias: tensor(&[16]),
-            mlp_c_proj_weight: tensor(&[16, 4]),
+            mlp_c_proj_weight: weight(&[16, 4]),
             mlp_c_proj_bias: tensor(&[4]),
         }
     }
