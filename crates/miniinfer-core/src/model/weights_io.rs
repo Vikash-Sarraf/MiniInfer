@@ -9,7 +9,7 @@ use crate::{
         config::ModelConfig,
         gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead},
     },
-    tensor::{QuantizedTensor, Tensor},
+    tensor::{QuantizationScale, QuantizedTensor, Tensor},
 };
 
 #[derive(Deserialize)]
@@ -278,7 +278,12 @@ fn read_binary_tensor(
 
             let data = bytes.iter().map(|byte| *byte as i8).collect::<Vec<i8>>();
 
-            QuantizedTensor::new(tensor_index.shape.clone(), data, scale)?.dequantize()
+            QuantizedTensor::new(
+                tensor_index.shape.clone(),
+                data,
+                QuantizationScale::PerTensor(scale),
+            )?
+            .dequantize()
         }
     }
 }
