@@ -68,6 +68,8 @@ struct BinaryTensorIndexFile {
     offset_bytes: u64,
     len: usize,
     scale: Option<f32>,
+    scales: Option<Vec<f32>>,
+    scale_axis: Option<usize>,
 }
 
 pub(super) fn load_gpt2_weights_from_model_dir(
@@ -272,16 +274,14 @@ fn read_binary_tensor(
             Tensor::new(tensor_index.shape.clone(), data)
         }
         DType::I8Symmetric => {
-            let scale = tensor_index.scale.ok_or_else(|| MiniInferError::InvalidConfig {
-                message: format!("tensor {name} i8_symmetric dtype requires scale"),
-            })?;
+            let scale = quantization_scale(name, tensor_index)?;
 
             let data = bytes.iter().map(|byte| *byte as i8).collect::<Vec<i8>>();
 
             QuantizedTensor::new(
                 tensor_index.shape.clone(),
                 data,
-                QuantizationScale::PerTensor(scale),
+                scale,
             )?
             .dequantize()
         }
@@ -337,6 +337,22 @@ fn tensor_dtype(index: &BinaryWeightsIndexFile, tensor: &BinaryTensorIndexFile) 
         }
         other => Err(MiniInferError::InvalidConfig {
             message: format!("unsupported weights index format version {other}"),
+        }),
+    }
+}
+
+fn quantization_scale(name: &str, tensor_index: &BinaryTensorIndexFile) -> Result<QuantizationScale> {
+    match (&tensor_index.scale, &tensor_index.scales, tensor_index.scale_axis) {
+        (Some(scale), None, None) => Ok(QuantizationScale::PerTensor(*scale)),
+
+        (None, Some(scales), Some(axis)) => Ok(QuantizationScale::PerAxis { axis, scales: scales.clone() }),
+
+        (None, None, _) => Err(MiniInferError::InvalidConfig {
+            message: format!("tensor {} must include quantization scale", name),
+        }),
+
+        _ => Err(MiniInferError::InvalidConfig {
+            message: format!("tensor {} has invalid quantization scale configuration", name),
         }),
     }
 }
@@ -421,9 +437,39 @@ mod tests {
         assert_eq!(
             err,
             MiniInferError::InvalidConfig {
-                message: "tensor weight i8_symmetric dtype requires scale".to_string(),
+                message: "tensor weight must include quantization scale".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn read_binary_tensor_reads_v2_i8_symmetric_per_axis_tensor_and_dequantizes() {
+        let mut data_file = Cursor::new(vec![1i8 as u8, 2i8 as u8, 3i8 as u8, 4i8 as u8, 5i8 as u8, 6i8 as u8]);
+
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor_with_scales(
+                vec![2, 3],
+                Some("i8_symmetric"),
+                0,
+                6,
+                vec![0.1, 0.2, 0.3],
+                1,
+            ),
+        );
+
+        let tensor = read_binary_tensor(&mut data_file, &index, "weight")
+            .expect("v2 per-axis i8 tensor should load and dequantize");
+
+        assert_eq!(tensor.shape(), &[2, 3]);
+        assert_close(tensor.data()[0], 0.1);
+        assert_close(tensor.data()[1], 0.4);
+        assert_close(tensor.data()[2], 0.9);
+        assert_close(tensor.data()[3], 0.4);
+        assert_close(tensor.data()[4], 1.0);
+        assert_close(tensor.data()[5], 1.8);
     }
 
     fn binary_index(format_version: u32, dtype: Option<&str>) -> BinaryWeightsIndexFile {
@@ -460,6 +506,27 @@ mod tests {
             offset_bytes,
             len,
             scale,
+            scales: None,
+            scale_axis: None,
+        }
+    }
+
+    fn binary_tensor_with_scales(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        offset_bytes: u64,
+        len: usize,
+        scales: Vec<f32>,
+        scale_axis: usize,
+    ) -> BinaryTensorIndexFile {
+        BinaryTensorIndexFile {
+            shape,
+            dtype: dtype.map(str::to_string),
+            offset_bytes,
+            len,
+            scale: None,
+            scales: Some(scales),
+            scale_axis: Some(scale_axis),
         }
     }
 
@@ -469,5 +536,9 @@ mod tests {
             data.write_all(&value.to_le_bytes()).expect("test data write should succeed");
         }
         Cursor::new(data)
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-5, "actual {actual} expected {expected}");
     }
 }

@@ -153,9 +153,11 @@ def write_binary_weights(
 			}
 
 			if should_quantize_tensor(name, tensor, quantization):
-				data, scale = quantized_tensor_bytes(tensor)
+				data, scales, axis = quantized_tensor_bytes(tensor)
 				entry["dtype"] = "i8_symmetric"
-				entry["scale"] = scale
+				entry["scales"] = scales
+				entry["scale-axis"] = axis
+
 			else:
 				data = tensor_bytes(tensor)
 				if quantization == "int8":
@@ -385,19 +387,19 @@ def should_quantize_tensor(name: str, tensor: Any, quantization: str) -> bool:
 		)
 	)
 
+def quantized_tensor_bytes(tensor: Any) -> tuple[bytes, list[float], int]:
+    array = tensor.detach().cpu().float().contiguous().numpy()
 
-def quantized_tensor_bytes(tensor: Any) -> tuple[bytes, float]:
-	array = tensor.detach().cpu().float().contiguous().numpy()
-	max_abs = float(abs(array).max())
-	if max_abs == 0.0:
-		scale = 1.0
-		quantized = array * 0
-	else:
-		scale = max_abs / 127.0
-		quantized = (array / scale).round().clip(-127, 127)
+    if array.ndim != 2:
+        raise SystemExit("per-channel int8 quantization currently requires rank-2 tensors")
 
-	return quantized.astype("i1", copy=False).tobytes(order="C"), scale
+    scale_axis = 1
+    max_abs = abs(array).max(axis=0)
+    scales = max_abs / 127.0
+    scales[scales == 0.0] = 1.0
 
+    quantized = (array / scales).round().clip(-127, 127)
+    return quantized.astype("i1", copy=False).tobytes(order="C"), scales.tolist(), scale_axis
 
 def numel(shape: list[int]) -> int:
 	result = 1
