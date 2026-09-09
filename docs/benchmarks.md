@@ -43,6 +43,14 @@ Default cached packed-int8 generation:
 cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer-int8-channel --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --runs 1
 ```
 
+Process memory and CPU sampling:
+
+```powershell
+cargo build --release -p miniinfer-cli
+.\tools\measure_process_memory.ps1 -Command '.\target\release\miniinfer-cli.exe run --model models/gpt2-miniinfer-int8-channel --prompt "Once upon a time" --max-new-tokens 100 --temperature 0.8 --top-k 40 --top-p 0.9 --seed 42 --stream'
+.\tools\measure_process_memory.ps1 -Command '.\target\release\miniinfer-cli.exe run --model models/gpt2-miniinfer-int8-channel --prompt "Once upon a time" --max-new-tokens 100 --temperature 0.8 --top-k 40 --top-p 0.9 --seed 42 --stream --weight-runtime f32'
+```
+
 ## KV-Cache Generation Results
 
 | Prompt                                                     | Prompt tokens | Generated tokens | Final tokens | No-cache generation | No-cache tok/s | KV-cache generation | KV-cache tok/s | Speedup | Outputs match |
@@ -91,13 +99,13 @@ The packed path improves one-row cached decode, but it is slower for multi-row n
 
 Packed matmul microbenchmark from `bench-matmul`:
 
-| Case                        | Shape                  | NdArray FP32 | Dequantized int8 | Packed int8 | Packed matches dequantized |
-| --------------------------- | ---------------------- | -----------: | ---------------: | ----------: | -------------------------- |
-| tiny                        | `64x64 * 64x64`        |       28.9us |           16.1us |      95.4us | true                       |
-| gpt2 decode c_attn          | `1x768 * 768x2304`     |     1.1921ms |          924.1us |     843.2us | true                       |
-| gpt2 decode c_fc            | `1x768 * 768x3072`     |     2.0612ms |         1.3127ms |     946.5us | true                       |
-| gpt2 short prefill c_attn   | `12x768 * 768x2304`    |     1.6421ms |         1.7641ms |    8.2014ms | true                       |
-| gpt2 longer no-cache c_attn | `72x768 * 768x2304`    |     3.1971ms |         3.1979ms |   48.3246ms | true                       |
+| Case                        | Shape               | NdArray FP32 | Dequantized int8 | Packed int8 | Packed matches dequantized |
+| --------------------------- | ------------------- | -----------: | ---------------: | ----------: | -------------------------- |
+| tiny                        | `64x64 * 64x64`     |       28.9us |           16.1us |      95.4us | true                       |
+| gpt2 decode c_attn          | `1x768 * 768x2304`  |     1.1921ms |          924.1us |     843.2us | true                       |
+| gpt2 decode c_fc            | `1x768 * 768x3072`  |     2.0612ms |         1.3127ms |     946.5us | true                       |
+| gpt2 short prefill c_attn   | `12x768 * 768x2304` |     1.6421ms |         1.7641ms |    8.2014ms | true                       |
+| gpt2 longer no-cache c_attn | `72x768 * 768x2304` |     3.1971ms |         3.1979ms |   48.3246ms | true                       |
 
 | Prompt                                                     | Active cache payload | Allocated cache payload | Capacity cache payload |
 | ---------------------------------------------------------- | -------------------: | ----------------------: | ---------------------: |
@@ -105,6 +113,19 @@ Packed matmul microbenchmark from `bench-matmul`:
 | `Hello world`                                              |      2,359,296 bytes |        75,497,472 bytes |       75,497,472 bytes |
 
 The cache memory numbers are FP32 key/value payload bytes, not whole-process heap usage. `Active` reflects the tokens currently stored in the cache, while `Allocated` and `Capacity` reflect the preallocated per-layer, per-head buffers.
+
+## Process Memory and CPU Sampling
+
+The helper script at `tools/measure_process_memory.ps1` starts a command, samples the process tree, and reports peak process memory plus sampled CPU usage. These numbers include model loading, allocator behavior, executable/DLL overhead, and runtime buffers; they complement the deterministic KV-cache payload counters above.
+
+Seeded 100-token streamed generation on `models/gpt2-miniinfer-int8-channel` with prompt `Once upon a time`, `--temperature 0.8 --top-k 40 --top-p 0.9 --seed 42`:
+
+| Weight runtime | Elapsed | Wall time | Total CPU time | Average CPU | Peak sampled CPU | Peak working set | Peak private memory |
+| -------------- | ------: | --------: | -------------: | ----------: | ---------------: | ---------------: | ------------------: |
+| `packed-int8`  |  6.500s |    9.313s |         7.766s |        4.2% |             6.1% |      341.238 MiB |         343.395 MiB |
+| `f32`          |  8.058s |   11.079s |         9.781s |        4.4% |             6.8% |      585.344 MiB |         586.324 MiB |
+
+On this run, packed-int8 saved about `242.929 MiB` peak private memory and improved MiniInfer's reported generation elapsed time by about `1.24x`. On a 20 logical processor machine, `5%` total CPU roughly corresponds to one fully busy logical processor, so both runs are primarily single-core-bound.
 
 ## Time to First Token
 
@@ -211,7 +232,7 @@ The outputs match because the comparison uses greedy decoding. Matching output i
 
 ## Known Benchmark Gaps
 
-- KV-cache reporting currently covers FP32 key/value payload bytes, not allocator overhead or total process memory.
+- KV-cache reporting covers FP32 key/value payload bytes; `tools/measure_process_memory.ps1` samples process-tree memory for allocator and executable overhead.
 - Cached decode attention reads borrowed key/value cache slices directly; owned tensor readback remains for tests and inspection.
 - Current recorded results are local measurements; use `--runs` to reduce single-run timing noise.
 - CPU frequency scaling, background load, and thermal state can affect these numbers.
@@ -221,8 +242,8 @@ The outputs match because the comparison uses greedy decoding. Matching output i
 Useful next benchmark improvements:
 
 ```text
-1. Add process-level memory measurements for allocator overhead and temporary tensors.
+1. Add deterministic model weight payload byte reporting for FP32 vs packed-int8 runtime modes.
 2. Compare reference backend vs ndarray backend on generation, not only matmul.
-3. Add deterministic model weight payload byte reporting for FP32 vs packed-int8 runtime modes.
-4. Track prefill and decode timings across multiple prompt lengths.
+3. Track prefill and decode timings across multiple prompt lengths.
+4. Repeat process memory sampling with `--runs`-style aggregation or multiple manual runs.
 ```
