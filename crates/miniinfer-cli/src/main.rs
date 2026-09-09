@@ -7,11 +7,13 @@ use miniinfer_core::{
 
 mod args;
 mod bench;
+mod server;
 
 use args::{BackendName, Cli, Command, InspectArgs, LogitsArgs, PromptInputArgs, RunArgs};
 use bench::{bench_generate, bench_matmul};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -21,6 +23,7 @@ fn main() -> Result<()> {
         Command::Bench => println!("miniinfer bench: not implemented yet"),
         Command::BenchGenerate(args) => bench_generate(args)?,
         Command::BenchMatmul => bench_matmul(),
+        Command::Serve(args) => server::serve(args).await?,
     }
     Ok(())
 }

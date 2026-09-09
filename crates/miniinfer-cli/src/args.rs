@@ -24,7 +24,34 @@ pub(crate) enum Command {
     BenchGenerate(BenchGenerateArgs),
     #[command(name = "bench-matmul", about = "Benchmark reference vs ndarray matmul")]
     BenchMatmul,
+    #[command(about = "Serve a model over HTTP")]
+    Serve(ServeArgs),
 }
+
+#[derive(Args)]
+pub(crate) struct ServeArgs {
+    #[arg(long)]
+    pub model: String,
+
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    #[arg(long, default_value_t = BackendName::Ndarray)]
+    pub backend: BackendName,
+
+    #[arg(long, value_enum, default_value_t = WeightRuntimeArg::PackedInt8)]
+    pub weight_runtime: WeightRuntimeArg,
+
+    #[arg(long, hide = true, conflicts_with = "no_kv_cache")]
+    pub kv_cache: bool,
+
+    #[arg(long)]
+    pub no_kv_cache: bool,
+}
+
 
 #[derive(Args)]
 pub(crate) struct InspectArgs {
