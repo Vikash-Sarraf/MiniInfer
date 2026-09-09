@@ -1,18 +1,26 @@
 use miniinfer_core::{
     error::{MiniInferError, Result},
-    model::loader::{load_model, LoadedModel},
+    model::loader::{load_model_with_runtime, LoadedModel},
     ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend},
     runtime::generation::{GenerationOptions, KvCacheMemoryReport},
-    tensor::Tensor,
+    tensor::{PackedI8Weight, QuantizationScale, QuantizedTensor, Tensor, WeightTensor},
 };
 
 use crate::{args::BenchGenerateArgs, encode_prompt_input, with_backend};
 
 pub(crate) fn bench_matmul() {
-    let m = 64;
-    let n = 64;
-    let k = 64;
+    bench_matmul_case("tiny", 64, 64, 64, true);
+    println!();
+    bench_matmul_case("gpt2 decode c_attn", 1, 768, 2304, false);
+    println!();
+    bench_matmul_case("gpt2 decode c_fc", 1, 768, 3072, false);
+    println!();
+    bench_matmul_case("gpt2 short prefill c_attn", 12, 768, 2304, false);
+    println!();
+    bench_matmul_case("gpt2 longer no-cache c_attn", 72, 768, 2304, false);
+}
 
+fn bench_matmul_case(label: &str, m: usize, k: usize, n: usize, include_reference: bool) {
     let mut a_data: Vec<f32> = Vec::with_capacity(m * k);
     for i in 0..m {
         for j in 0..k {
@@ -30,23 +38,95 @@ pub(crate) fn bench_matmul() {
     let a = Tensor::new(vec![m, k], a_data).expect("valid tensor");
     let b = Tensor::new(vec![k, n], b_data).expect("valid tensor");
 
+    let quantized_b = quantize_symmetric_per_column(&b).expect("per-column quantized weight");
+    let dequantized_b = quantized_b.dequantize().expect("dequantized weight");
+    let packed_b = PackedI8Weight::new(quantized_b.clone()).expect("packed weight");
+    let packed_weight = WeightTensor::PackedI8Symmetric(packed_b);
+
+    println!("Case: {label}");
     println!("Matrix size: {m}x{k} * {k}x{n}");
 
-    let reference_backend = ReferenceBackend::new();
-    let start = std::time::Instant::now();
-    let output_ref = reference_backend.matmul(&a, &b).expect("matmul should succeed");
-    let reference_elapsed = start.elapsed();
-
     let nd_backend = NdArrayBackend::new();
+
+    if include_reference {
+        let reference_backend = ReferenceBackend::new();
+        let start = std::time::Instant::now();
+        let output_ref = reference_backend.matmul(&a, &b).expect("matmul should succeed");
+        let reference_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let output_nd = nd_backend.matmul(&a, &b).expect("matmul should succeed");
+        let ndarray_elapsed = start.elapsed();
+
+        let outputs_match = tensors_close(&output_ref, &output_nd, 1e-4);
+
+        println!("ReferenceBackend: {reference_elapsed:?}");
+        println!("NdArrayBackend FP32: {ndarray_elapsed:?}");
+        println!("Reference/ndarray outputs match: {outputs_match}");
+    }
+
     let start = std::time::Instant::now();
-    let output_nd = nd_backend.matmul(&a, &b).expect("matmul should succeed");
-    let ndarray_elapsed = start.elapsed();
+    let output_fp32 = nd_backend.matmul(&a, &b).expect("fp32 matmul should succeed");
+    let fp32_elapsed = start.elapsed();
 
-    let outputs_match = tensors_close(&output_ref, &output_nd, 1e-4);
+    let start = std::time::Instant::now();
+    let output_dequantized = nd_backend
+        .matmul(&a, &dequantized_b)
+        .expect("dequantized matmul should succeed");
+    let dequantized_elapsed = start.elapsed();
 
-    println!("ReferenceBackend: {reference_elapsed:?}");
-    println!("NdArrayBackend:   {ndarray_elapsed:?}");
-    println!("Outputs match:    {outputs_match}");
+    let quantized_outputs_close = tensors_close(&output_fp32, &output_dequantized, 1e-2);
+
+    let start = std::time::Instant::now();
+    let output_packed = nd_backend
+        .matmul_weight(&a, &packed_weight)
+        .expect("packed matmul should succeed");
+    let packed_elapsed = start.elapsed();
+
+    let packed_outputs_match = tensors_close(&output_dequantized, &output_packed, 1e-4);
+
+    println!("NdArrayBackend FP32: {fp32_elapsed:?}");
+    println!("NdArrayBackend dequantized int8: {dequantized_elapsed:?}");
+    println!("PackedI8Backend: {packed_elapsed:?}");
+    println!("Packed matches dequantized int8: {packed_outputs_match}");
+    println!("Quantized output close to FP32: {quantized_outputs_close}");
+}
+
+fn quantize_symmetric_per_column(tensor: &Tensor) -> Result<QuantizedTensor> {
+    if tensor.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: tensor.shape().len(),
+        });
+    }
+
+    let rows = tensor.shape()[0];
+    let cols = tensor.shape()[1];
+    let mut scales = vec![1.0; cols];
+
+    for (col, scale) in scales.iter_mut().enumerate() {
+        let mut max_abs = 0.0f32;
+        for row in 0..rows {
+            max_abs = max_abs.max(tensor.data()[row * cols + col].abs());
+        }
+        if max_abs > 0.0 {
+            *scale = max_abs / 127.0;
+        }
+    }
+
+    let mut data = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for (col, scale) in scales.iter().enumerate() {
+            let quantized = (tensor.data()[row * cols + col] / *scale).round().clamp(-127.0, 127.0);
+            data.push(quantized as i8);
+        }
+    }
+
+    QuantizedTensor::new(
+        tensor.shape().to_vec(),
+        data,
+        QuantizationScale::PerAxis { axis: 1, scales },
+    )
 }
 
 fn tensors_close(a: &Tensor, b: &Tensor, tolerance: f32) -> bool {
@@ -70,10 +150,11 @@ pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
             message: "runs must be greater than zero".to_string(),
         });
     }
+    let use_kv_cache = !args.no_kv_cache;
 
     let total_start = std::time::Instant::now();
     let load_start = std::time::Instant::now();
-    let model = load_model(args.model)?;
+    let model = load_model_with_runtime(args.model, args.weight_runtime.into())?;
     model.validate()?;
     let load_elapsed = load_start.elapsed();
 
@@ -122,6 +203,7 @@ pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
         let kv_cache_summary = summarize_generation_benchmark_results(&kv_cache_results)?;
 
         println!("Backend: {}", args.backend);
+        println!("Weight runtime: {}", args.weight_runtime);
         println!("Runs: {}", args.runs);
         println!("Prompt tokens: {prompt_tokens}");
         println!("Requested tokens: {}", args.max_new_tokens);
@@ -159,7 +241,7 @@ pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
                     &token_ids,
                     args.max_new_tokens,
                     backend,
-                    args.kv_cache,
+                    use_kv_cache,
                 )?);
             }
             Ok(results)
@@ -168,7 +250,8 @@ pub(crate) fn bench_generate(args: BenchGenerateArgs) -> Result<()> {
         let total_elapsed = total_start.elapsed();
 
         println!("Backend: {}", args.backend);
-        println!("Cache: {}", if args.kv_cache { "kv" } else { "none" });
+        println!("Weight runtime: {}", args.weight_runtime);
+        println!("Cache: {}", if use_kv_cache { "kv" } else { "none" });
         println!("Runs: {}", args.runs);
         println!("Prompt tokens: {prompt_tokens}");
         println!("Load time: {:.3}s", load_elapsed.as_secs_f64());

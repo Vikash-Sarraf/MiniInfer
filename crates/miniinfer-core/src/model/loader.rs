@@ -10,9 +10,14 @@ use crate::{
 };
 
 pub use super::config_io::load_config;
-pub use super::weights_io::{load_gpt2_binary_weights, load_gpt2_weights};
+pub use super::weights_io::{
+    load_gpt2_binary_weights,
+    load_gpt2_binary_weights_with_runtime,
+    load_gpt2_weights,
+    WeightRuntime,
+};
 
-use super::{tokenizer_io::load_tokenizer, weights_io::load_gpt2_weights_from_model_dir};
+use super::{tokenizer_io::load_tokenizer, weights_io::{load_gpt2_weights_from_model_dir_with_runtime}};
 
 #[cfg(test)]
 use crate::model::{
@@ -141,14 +146,14 @@ impl LoadedModel {
     }
 }
 
-pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
+pub fn load_model_with_runtime(model_dir: impl AsRef<Path>, runtime: WeightRuntime) -> Result<LoadedModel> {
     let model_dir = model_dir.as_ref();
 
     let config = load_config(model_dir.join("config.json"))?;
 
     match &config.architecture {
         Architecture::Gpt2 => {
-            let weights = load_gpt2_weights_from_model_dir(model_dir, &config)?;
+            let weights = load_gpt2_weights_from_model_dir_with_runtime(model_dir, &config, runtime)?;
             weights.validate_shapes(&config)?;
             let tokenizer = load_tokenizer(model_dir)?;
 
@@ -165,6 +170,10 @@ pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
             Ok(LoadedModel::Gpt2 { config, weights, tokenizer })
         }
     }
+}
+
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<LoadedModel> {
+    load_model_with_runtime(model_dir, WeightRuntime::F32)
 }
 
 #[cfg(test)]
@@ -404,7 +413,7 @@ mod tests {
         std::fs::write(model_dir.join("weights.json"), "not valid json")
             .expect("legacy weights placeholder should be written");
 
-        let weights = load_gpt2_weights_from_model_dir(&model_dir, &config)
+        let weights = load_gpt2_weights_from_model_dir_with_runtime(&model_dir, &config, WeightRuntime::F32)
             .expect("binary weights should load before legacy JSON");
 
         assert_eq!(weights.wte.shape(), &[config.vocab_size, config.hidden_size]);
@@ -424,7 +433,7 @@ mod tests {
         .expect("tiny GPT-2 config should load");
         std::fs::write(model_dir.join("weights.index.json"), "{}").expect("index should be written");
 
-        let err = match load_gpt2_weights_from_model_dir(&model_dir, &config) {
+        let err = match load_gpt2_weights_from_model_dir_with_runtime(&model_dir, &config, WeightRuntime::F32) {
             Ok(_) => panic!("partial binary weights should fail"),
             Err(err) => err,
         };

@@ -2,7 +2,7 @@ use std::io::{Write, stdout};
 
 use clap::Parser;
 use miniinfer_core::{
-    error::{MiniInferError, Result}, model::{config::ModelConfig, loader::{LoadedModel, load_model}}, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, runtime::generation::GenerationOptions,
+    error::{MiniInferError, Result}, model::{config::ModelConfig, loader::{LoadedModel, load_model, load_model_with_runtime}}, ops::backend::{NdArrayBackend, OpsBackend, ReferenceBackend}, runtime::generation::GenerationOptions,
 };
 
 mod args;
@@ -53,7 +53,8 @@ fn print_config(config: &ModelConfig) {
 }
 
 fn run_model(args: RunArgs) -> Result<()> {
-    let model = load_model(args.model)?;
+    let use_kv_cache = !args.no_kv_cache;
+    let model = load_model_with_runtime(args.model, args.weight_runtime.into())?;
     model.validate()?;
     let token_ids = encode_prompt_input(&model, args.input)?;
 
@@ -65,7 +66,7 @@ fn run_model(args: RunArgs) -> Result<()> {
         stdout.flush().expect("failed to flush stdout");
 
         with_backend(args.backend, |backend| {
-            if args.kv_cache {
+            if use_kv_cache {
                 generation_options.generate_streaming_with_kv_cache_and_backend(
                     &model,
                     &token_ids,
@@ -84,7 +85,7 @@ fn run_model(args: RunArgs) -> Result<()> {
         })?;
         println!();
     } else {
-        let decoded_text = if args.kv_cache {
+        let decoded_text = if use_kv_cache {
             with_backend(args.backend, |backend| {
                 generation_options.generate_with_kv_cache_and_backend(&model, &token_ids, backend)
             })?

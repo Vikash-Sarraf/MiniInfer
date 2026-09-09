@@ -29,12 +29,18 @@ Short smoke comparison:
 cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hello world" --max-new-tokens 30 --compare-cache
 ```
 
-If `--runs` is omitted, `bench-generate` defaults to one run and prints the same single-run timing fields. When `--runs` is greater than one, timing fields are reported as min/median/max summaries.
+If `--runs` is omitted, `bench-generate` defaults to one run and prints the same single-run timing fields. Single-mode generation benchmarks default to KV-cache generation and `--weight-runtime packed-int8`; use `--no-kv-cache --weight-runtime f32` for the older full-context FP32 path. When `--runs` is greater than one, timing fields are reported as min/median/max summaries.
 
 Matmul backend comparison:
 
 ```powershell
 cargo run --release -p miniinfer-cli -- bench-matmul
+```
+
+Default cached packed-int8 generation:
+
+```powershell
+cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer-int8-channel --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --runs 1
 ```
 
 ## KV-Cache Generation Results
@@ -61,6 +67,37 @@ Logit drift for prompt `Hello world`, comparing MiniInfer per-channel int8 again
 | Mean absolute difference | 0.35725098 |
 | Tolerance                | 1.00000000 |
 | Status                   |       PASS |
+
+## Packed Int8 Runtime Results
+
+MiniInfer now has an opt-in packed int8 runtime for selected GPT-2 block matrix weights. The CLI defaults to KV-cache generation with `--weight-runtime packed-int8`; use `--no-kv-cache --weight-runtime f32` for the older full-context FP32 path.
+
+Single-run generation comparison on `models/gpt2-miniinfer-int8-channel` with prompt `Hey I bet you're wondering how I got into this situation` and 60 requested tokens:
+
+| Weight runtime | Cache    | Load time | Generation time | Tokens/sec | Prompt prefill | Decode time | Decode tok/s |
+| -------------- | -------- | --------: | --------------: | ---------: | -------------: | ----------: | -----------: |
+| `f32`          | no-cache |    2.110s |         10.481s |      5.724 |            n/a |         n/a |          n/a |
+| `f32`          | KV cache |    2.110s |          4.725s |     12.698 |         0.393s |      4.330s |       13.855 |
+| `packed-int8`  | no-cache |    1.909s |         18.409s |      3.259 |            n/a |         n/a |          n/a |
+| `packed-int8`  | KV cache |    1.909s |          4.242s |     14.146 |         0.516s |      3.724s |       16.111 |
+
+Default single-mode packed-int8 KV-cache run after making cached packed-int8 generation the CLI default:
+
+| Weight runtime | Cache    | Load time | Generation time | Tokens/sec | Prompt prefill | Decode time | Decode tok/s |
+| -------------- | -------- | --------: | --------------: | ---------: | -------------: | ----------: | -----------: |
+| `packed-int8`  | KV cache |    1.943s |          4.170s |     14.388 |         0.519s |      3.649s |       16.443 |
+
+The packed path improves one-row cached decode, but it is slower for multi-row no-cache and prefill-style shapes. The ndarray backend therefore uses packed int8 for one-row packed weights and falls back to dequantized FP32 matmul for multi-row packed weights.
+
+Packed matmul microbenchmark from `bench-matmul`:
+
+| Case                        | Shape                  | NdArray FP32 | Dequantized int8 | Packed int8 | Packed matches dequantized |
+| --------------------------- | ---------------------- | -----------: | ---------------: | ----------: | -------------------------- |
+| tiny                        | `64x64 * 64x64`        |       28.9us |           16.1us |      95.4us | true                       |
+| gpt2 decode c_attn          | `1x768 * 768x2304`     |     1.1921ms |          924.1us |     843.2us | true                       |
+| gpt2 decode c_fc            | `1x768 * 768x3072`     |     2.0612ms |         1.3127ms |     946.5us | true                       |
+| gpt2 short prefill c_attn   | `12x768 * 768x2304`    |     1.6421ms |         1.7641ms |    8.2014ms | true                       |
+| gpt2 longer no-cache c_attn | `72x768 * 768x2304`    |     3.1971ms |         3.1979ms |   48.3246ms | true                       |
 
 | Prompt                                                     | Active cache payload | Allocated cache payload | Capacity cache payload |
 | ---------------------------------------------------------- | -------------------: | ----------------------: | ---------------------: |
@@ -186,6 +223,6 @@ Useful next benchmark improvements:
 ```text
 1. Add process-level memory measurements for allocator overhead and temporary tensors.
 2. Compare reference backend vs ndarray backend on generation, not only matmul.
-3. Add true int8 weight-only matmul and compare it against dequantize-on-load artifacts.
+3. Add deterministic model weight payload byte reporting for FP32 vs packed-int8 runtime modes.
 4. Track prefill and decode timings across multiple prompt lengths.
 ```

@@ -44,8 +44,12 @@ pub(crate) struct RunArgs {
     pub max_new_tokens: usize,
     #[arg(long)]
     pub stream: bool,
-    #[arg(long)]
+    #[arg(long, hide = true, conflicts_with = "no_kv_cache")]
     pub kv_cache: bool,
+    #[arg(long)]
+    pub no_kv_cache: bool,
+    #[arg(long, value_enum, default_value_t = WeightRuntimeArg::PackedInt8)]
+    pub weight_runtime: WeightRuntimeArg,
     #[arg(long)]
     pub temperature: Option<f32>,
     #[arg(long, requires = "temperature")]
@@ -80,10 +84,14 @@ pub(crate) struct BenchGenerateArgs {
     pub max_new_tokens: usize,
     #[arg(long, default_value_t = 1)]
     pub runs: usize,
-    #[arg(long, conflicts_with = "compare_cache")]
+    #[arg(long, hide = true, conflicts_with_all = ["compare_cache", "no_kv_cache"])]
     pub kv_cache: bool,
+    #[arg(long, conflicts_with_all = ["compare_cache", "kv_cache"])]
+    pub no_kv_cache: bool,
     #[arg(long)]
     pub compare_cache: bool,
+    #[arg(long, value_enum, default_value_t = WeightRuntimeArg::PackedInt8)]
+    pub weight_runtime: WeightRuntimeArg,
 }
 
 #[derive(Args)]
@@ -99,6 +107,31 @@ pub(crate) struct PromptInputArgs {
 pub(crate) enum BackendName {
     Ndarray,
     Reference,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum WeightRuntimeArg {
+    F32,
+    #[value(alias = "packedint8")]
+    PackedInt8,
+}
+
+impl From<WeightRuntimeArg> for miniinfer_core::model::loader::WeightRuntime {
+    fn from(value: WeightRuntimeArg) -> Self {
+        match value {
+            WeightRuntimeArg::F32 => Self::F32,
+            WeightRuntimeArg::PackedInt8 => Self::PackedInt8,
+        }
+    }
+}
+
+impl std::fmt::Display for WeightRuntimeArg {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F32 => write!(formatter, "f32"),
+            Self::PackedInt8 => write!(formatter, "packed-int8"),
+        }
+    }
 }
 
 impl std::fmt::Display for BackendName {

@@ -94,7 +94,7 @@ The int8 converter stores selected GPT-2 block matrix weights as `i8_symmetric` 
 
 ## Run Generation
 
-Greedy generation with the default ndarray backend:
+Greedy generation with the default ndarray backend, KV cache, and packed-int8 weight runtime:
 
 ```powershell
 cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60
@@ -106,10 +106,10 @@ Streaming generation:
 cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --stream
 ```
 
-KV-cache generation:
+Disable KV-cache generation for diagnostic full-context recompute:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --kv-cache
+cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --no-kv-cache --weight-runtime f32
 ```
 
 Sampling example:
@@ -128,7 +128,7 @@ Compare no-cache and KV-cache generation:
 cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache --runs 5
 ```
 
-`bench-generate` defaults to one run when `--runs` is omitted. Use `--runs` above `1` to print min/median/max timing summaries.
+`run` and single-mode `bench-generate` default to KV-cache generation and `--weight-runtime packed-int8`. Use `--no-kv-cache --weight-runtime f32` for the older full-context FP32 runtime. `bench-generate` defaults to one run when `--runs` is omitted. Use `--runs` above `1` to print min/median/max timing summaries.
 
 Recent local result on Windows 11 Pro with a 13th Gen Intel Core i7-13800H:
 
@@ -144,6 +144,12 @@ Per-channel int8 artifact result:
 | FP32             |  497,759,232 bytes |                n/a |                 n/a |
 | Per-channel int8 |  242,955,264 bytes |         0.46926117 |          0.35725098 |
 
+Packed-int8 runtime result on the per-channel int8 artifact, with the current default cached generation path:
+
+| Weight runtime | Cache    | Generated tokens | Generation time | Tokens/sec | Decode time | Decode tok/s |
+| -------------- | -------- | ---------------: | --------------: | ---------: | ----------: | -----------: |
+| `packed-int8`  | KV cache |               60 |          4.170s |     14.388 |      3.649s |       16.443 |
+
 For GPT-2 small, the current benchmark output also reports KV-cache payload memory. A full 1024-token cache reserves `75,497,472` bytes, or `72.000 MiB`, for FP32 keys and values.
 
 See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, and notes about benchmark limitations.
@@ -152,14 +158,14 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 
 - [docs/kv-cache.md](docs/kv-cache.md) explains the current KV-cache layout, decode flow, benchmark result, and limitations.
 - [docs/benchmarks.md](docs/benchmarks.md) records reproducible benchmark commands and current local results.
-- [docs/quantization.md](docs/quantization.md) explains the current int8 artifact format, dequantize-on-load path, and measured drift.
+- [docs/quantization.md](docs/quantization.md) explains the current int8 artifact format, packed runtime path, and measured drift.
 - [.github/docs/plan.md](.github/docs/plan.md) tracks the larger V1/V1.5 roadmap.
 
 ## Current Limitations
 
 - GPT-2 is the only implemented model architecture.
 - CPU is the only runtime target.
-- Int8 weight artifacts currently dequantize to FP32 at load time; true int8 matmul is future work.
+- Packed-int8 is currently optimized for cached one-token decode; no-cache and multi-row paths still favor FP32 ndarray matmul.
 - Benchmark results are local measurements and can be summarized across repeated runs with `--runs`.
 - The runtime is an inference engine, not a production server.
 
@@ -174,5 +180,5 @@ MiniInfer currently demonstrates:
 - deterministic and stochastic generation controls
 - streaming text output
 - per-layer KV-cache decode with optimized prompt prefill, benchmarked speedup, and payload memory reporting
-- per-channel int8 weight artifact compression with measured logit drift against a Hugging Face FP32 reference
+- per-channel int8 weight artifact compression, packed decode runtime, and measured logit drift against a Hugging Face FP32 reference
 - correctness-focused tests and reproducible benchmark commands

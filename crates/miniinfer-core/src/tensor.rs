@@ -1,6 +1,13 @@
 use crate::error::{MiniInferError, Result};
 
 #[derive(Debug, Clone)]
+pub struct PackedI8Weight {
+    shape: Vec<usize>,
+    data_by_col: Vec<i8>,
+    scale: QuantizationScale
+}
+
+#[derive(Debug, Clone)]
 pub struct Tensor {
     shape: Vec<usize>,
     data: Vec<f32>,
@@ -10,6 +17,7 @@ pub struct Tensor {
 pub enum WeightTensor {
     F32(Tensor),
     I8Symmetric(QuantizedTensor),
+    PackedI8Symmetric(PackedI8Weight),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,11 +36,71 @@ pub struct QuantizedTensor {
     scale: QuantizationScale,
 }
 
+impl PackedI8Weight {
+    pub fn new(weight: QuantizedTensor) -> Result<PackedI8Weight> {
+        if weight.shape.len() != 2 {
+            return Err(MiniInferError::WrongRank { expected: 2, actual: weight.shape.len() });
+        }
+
+        let rows = weight.shape[0];
+        let cols = weight.shape[1];
+
+        let mut packed = vec![0i8; rows * cols];
+        for row in 0..rows {
+            for col in 0..cols {
+                packed[col * rows + row] = weight.data[row * cols + col];
+            }
+        }
+        Ok(PackedI8Weight {
+            shape: weight.shape,
+            data_by_col: packed,
+            scale: weight.scale,
+        })
+    }
+
+    pub fn dequantize(&self) -> Result<Tensor> {
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+
+        let mut dequantized = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let q = self.data_by_col[col * rows + row];
+                let f = match self.scale {
+                    QuantizationScale::PerTensor(scale) => q as f32 * scale,
+                    QuantizationScale::PerAxis { axis, ref scales } => {
+                        let scale = if axis == 0 { scales[row] } else { scales[col] };
+                        q as f32 * scale
+                    }
+                };
+                dequantized.push(f);
+            }
+        }
+        Ok(Tensor {
+            shape: self.shape.clone(),
+            data: dequantized,
+        })
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn data_by_col(&self) -> &[i8] {
+        &self.data_by_col
+    }
+
+    pub fn scale(&self) -> &QuantizationScale {
+        &self.scale
+    }
+}
+
 impl WeightTensor {
     pub fn shape(&self) -> &[usize] {
         match self {
             WeightTensor::F32(tensor) => tensor.shape(),
             WeightTensor::I8Symmetric(tensor) => tensor.shape(),
+            WeightTensor::PackedI8Symmetric(weight) => &weight.shape,
         }
     }
 
@@ -40,6 +108,7 @@ impl WeightTensor {
         match self {
             WeightTensor::F32(tensor) => Ok(tensor.clone()),
             WeightTensor::I8Symmetric(tensor) => tensor.dequantize(),
+            WeightTensor::PackedI8Symmetric(weight) => weight.dequantize(),
         }
     }
 }
@@ -53,6 +122,12 @@ impl From<Tensor> for WeightTensor {
 impl From<QuantizedTensor> for WeightTensor {
     fn from(tensor: QuantizedTensor) -> Self {
         WeightTensor::I8Symmetric(tensor)
+    }
+}
+
+impl From<PackedI8Weight> for WeightTensor {
+    fn from(weight: PackedI8Weight) -> Self {
+        WeightTensor::PackedI8Symmetric(weight)
     }
 }
 
@@ -508,5 +583,82 @@ mod tests {
                 "actual {actual} expected {expected} scale {scale}",
             );
         }
+    }
+
+    #[test]
+    fn packed_i8_weight_preserves_shape() {
+        let weight = WeightTensor::PackedI8Symmetric(PackedI8Weight {
+            shape: vec![2, 3],
+            data_by_col: vec![-127, 0, 127, -64, 0, 64],
+            scale: QuantizationScale::PerTensor(1.0 / 127.0),
+        });
+
+        let dequantized = weight.dequantize().expect("packed i8 weight should dequantize");
+
+        assert_eq!(dequantized.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn packed_i8_weight_reorders_columns() {
+        let quantized = QuantizedTensor::new(
+            vec![2, 3],
+            vec![
+                1, 2, 3,
+                4, 5, 6,
+            ],
+            QuantizationScale::PerTensor(1.0),
+        )
+        .expect("valid quantized tensor");
+
+        let packed = PackedI8Weight::new(quantized).expect("packing should succeed");
+
+        assert_eq!(packed.shape, vec![2, 3]);
+        assert_eq!(packed.data_by_col, vec![
+            1, 4,
+            2, 5,
+            3, 6,
+        ]);
+    }
+
+    #[test]
+    fn packed_i8_weight_dequantizes_same_as_quantized_tensor() {
+        let quantized = QuantizedTensor::new(
+            vec![2, 3],
+            vec![
+                1, 2, 3,
+                4, 5, 6,
+            ],
+            QuantizationScale::PerAxis {
+                axis: 1,
+                scales: vec![0.1, 0.2, 0.3],
+            },
+        )
+        .expect("valid quantized tensor");
+
+        let expected = quantized.dequantize().expect("quantized tensor should dequantize");
+        let packed = PackedI8Weight::new(quantized).expect("packing should succeed");
+        let actual = packed.dequantize().expect("packed weight should dequantize");
+
+        assert_eq!(actual.shape(), expected.shape());
+
+        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+            assert_close(*actual, *expected);
+        }
+    }
+
+    #[test]
+    fn packed_i8_weight_rejects_non_2d_weight() {
+        let weight = QuantizedTensor::new(vec![2, 3, 4], vec![
+            -1, 0, 1, -0, 0, 0,
+            -1, 0, 1, -0, 0, 0,
+            -1, 0, 1, -0, 0, 0,
+            -1, 0, 1, -0, 0, 0,
+        ],
+        QuantizationScale::PerTensor(1.0 / 127.0),
+        ).unwrap();
+
+        let err = PackedI8Weight::new(weight).expect_err("wrong rank");
+
+        assert_eq!(err, MiniInferError::WrongRank { expected: 2, actual: 3 });
     }
 }

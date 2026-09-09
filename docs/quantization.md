@@ -65,6 +65,14 @@ Inspect it:
 cargo run --release -p miniinfer-cli -- inspect --model models/gpt2-miniinfer-int8-channel
 ```
 
+Run it with the default cached packed-int8 runtime:
+
+```powershell
+cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer-int8-channel --prompt "Once upon a time" --max-new-tokens 60 --stream
+```
+
+Use `--weight-runtime f32` to dequantize block weights on load for comparison, or `--no-kv-cache --weight-runtime f32` to measure the older full-context path.
+
 Compare logits against Hugging Face FP32:
 
 ```powershell
@@ -94,7 +102,7 @@ Per-channel scales significantly improve over the earlier per-tensor int8 checkp
 
 ## Limitations
 
-- Int8 weights are dequantized to FP32 during load, so runtime memory and matmul execution are still FP32.
 - The current converter quantizes only selected GPT-2 block matrix weights.
+- Packed-int8 runtime is optimized for cached one-token decode; multi-row prefill and no-cache paths still favor FP32 ndarray matmul.
 - Per-channel metadata increases index size, but the large binary payload still shrinks substantially.
-- True int8 inference requires keeping quantized weights in memory and adding a weight-only int8 matmul path.
+- Full int8 inference would require activation quantization and `i8 x i8 -> i32` kernels; the current runtime keeps activations in FP32 and uses weight-only int8 packing.

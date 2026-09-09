@@ -9,8 +9,14 @@ use crate::{
         config::ModelConfig,
         gpt2::{Gpt2BlockWeights, Gpt2Weights, LMHead},
     },
-    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor},
+    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor, PackedI8Weight},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightRuntime {
+    F32,
+    PackedInt8,
+}
 
 #[derive(Deserialize)]
 pub(super) struct TensorFile {
@@ -72,15 +78,18 @@ struct BinaryTensorIndexFile {
     scale_axis: Option<usize>,
 }
 
-pub(super) fn load_gpt2_weights_from_model_dir(
+pub(super) fn load_gpt2_weights_from_model_dir_with_runtime(
     model_dir: &Path,
     config: &ModelConfig,
+    runtime: WeightRuntime,
 ) -> Result<Gpt2Weights> {
     let binary_index_path = model_dir.join("weights.index.json");
     let binary_data_path = model_dir.join("weights.bin");
 
     match (binary_index_path.exists(), binary_data_path.exists()) {
-        (true, true) => load_gpt2_binary_weights(binary_index_path, binary_data_path, config),
+        (true, true) => {
+            load_gpt2_binary_weights_with_runtime(binary_index_path, binary_data_path, config, runtime)
+        }
         (false, false) => load_gpt2_weights(model_dir.join("weights.json")),
         _ => Err(MiniInferError::InvalidConfig {
             message: "binary weights require both weights.index.json and weights.bin".to_string(),
@@ -132,6 +141,35 @@ pub fn load_gpt2_binary_weights(
     data_path: impl AsRef<Path>,
     config: &ModelConfig,
 ) -> Result<Gpt2Weights> {
+    load_gpt2_binary_weights_with_runtime(index_path, data_path, config, WeightRuntime::F32)
+}
+
+fn read_binary_block_weight_tensor(
+    data_file: &mut (impl Read + Seek),
+    index: &BinaryWeightsIndexFile,
+    name: &str,
+    runtime: WeightRuntime,
+) -> Result<WeightTensor> {
+    match runtime {
+        WeightRuntime::F32 => read_binary_tensor(data_file, index, name).map(WeightTensor::F32),
+        WeightRuntime::PackedInt8 => {
+            match read_binary_weight_tensor(data_file, index, name)? {
+                WeightTensor::F32(tensor) => Ok(WeightTensor::F32(tensor)),
+                WeightTensor::I8Symmetric(weight) => {
+                    Ok(WeightTensor::PackedI8Symmetric(PackedI8Weight::new(weight)?))
+                }
+                WeightTensor::PackedI8Symmetric(weight) => Ok(WeightTensor::PackedI8Symmetric(weight)),
+            }
+        }
+    }
+}
+
+pub fn load_gpt2_binary_weights_with_runtime(
+    index_path: impl AsRef<Path>,
+    data_path: impl AsRef<Path>,
+    config: &ModelConfig,
+    runtime: WeightRuntime,
+) -> Result<Gpt2Weights> {
     let index_path = index_path.as_ref();
     let data_path = data_path.as_ref();
 
@@ -156,19 +194,18 @@ pub fn load_gpt2_binary_weights(
         blocks.push(Gpt2BlockWeights {
             ln_1_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_weight"))?,
             ln_1_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_1_bias"))?,
-            c_attn_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"))?.into(),
+            c_attn_weight: read_binary_block_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_weight"), runtime)?,
             c_attn_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_attn_bias"))?,
-            attn_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"))?.into(),
+            attn_c_proj_weight: read_binary_block_weight_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_weight"), runtime)?,
             attn_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.attn_c_proj_bias"))?,
             ln_2_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_weight"))?,
             ln_2_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.ln_2_bias"))?,
-            c_fc_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"))?.into(),
+            c_fc_weight: read_binary_block_weight_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_weight"), runtime)?,
             c_fc_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.c_fc_bias"))?,
-            mlp_c_proj_weight: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"))?.into(),
+            mlp_c_proj_weight: read_binary_block_weight_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_weight"), runtime)?,
             mlp_c_proj_bias: read_binary_tensor(&mut data_file, &index, &format!("{prefix}.mlp_c_proj_bias"))?,
         });
     }
-
     let lm_head_weight = load_binary_lm_head(&mut data_file, &index)?;
 
     Ok(Gpt2Weights {
@@ -483,6 +520,54 @@ mod tests {
         assert_close(tensor.data()[5], 1.8);
     }
 
+    #[test]
+    fn f32_runtime_loads_i8_as_f32() {
+        let mut data_file = Cursor::new(vec![1i8 as u8, 2i8 as u8, 3i8 as u8, 4i8 as u8, 5i8 as u8, 6i8 as u8]);
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor_with_scales(
+                vec![2, 3],
+                Some("i8_symmetric"),
+                0,
+                6,
+                vec![0.1, 0.2, 0.3],
+                1,
+            ),
+        );
+
+        let weight = read_binary_block_weight_tensor(&mut data_file, &index, "weight", WeightRuntime::F32)
+            .expect("i8 block weight should load as f32 runtime weight");
+
+        assert!(matches!(weight, WeightTensor::F32(_)));
+        assert_dequantized_values(&weight, &[0.1, 0.4, 0.9, 0.4, 1.0, 1.8]);
+    }
+
+    #[test]
+    fn packedint8_runtime_loads_i8_as_packedint8() {
+        let mut data_file = Cursor::new(vec![1i8 as u8, 2i8 as u8, 3i8 as u8, 4i8 as u8, 5i8 as u8, 6i8 as u8]);
+        let index = binary_index_with_tensor(
+            2,
+            None,
+            "weight",
+            binary_tensor_with_scales(
+                vec![2, 3],
+                Some("i8_symmetric"),
+                0,
+                6,
+                vec![0.1, 0.2, 0.3],
+                1,
+            ),
+        );
+
+        let weight = read_binary_block_weight_tensor(&mut data_file, &index, "weight", WeightRuntime::PackedInt8)
+            .expect("i8 block weight should load as packed int8 runtime weight");
+
+        assert!(matches!(weight, WeightTensor::PackedI8Symmetric(_)));
+        assert_dequantized_values(&weight, &[0.1, 0.4, 0.9, 0.4, 1.0, 1.8]);
+    }
+
     fn binary_index(format_version: u32, dtype: Option<&str>) -> BinaryWeightsIndexFile {
         BinaryWeightsIndexFile {
             format_version,
@@ -551,5 +636,15 @@ mod tests {
 
     fn assert_close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-5, "actual {actual} expected {expected}");
+    }
+
+    fn assert_dequantized_values(weight: &WeightTensor, expected: &[f32]) {
+        let dequantized = weight.dequantize().expect("weight should dequantize");
+        assert_eq!(dequantized.shape(), &[2, 3]);
+        assert_eq!(dequantized.data().len(), expected.len());
+
+        for (actual, expected) in dequantized.data().iter().zip(expected) {
+            assert_close(*actual, *expected);
+        }
     }
 }

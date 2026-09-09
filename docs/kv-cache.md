@@ -139,16 +139,22 @@ The current cached generation flow is:
 
 ## CLI Usage
 
-Run generation with the cache:
+Run generation with the cache. KV cache is the default for `run`:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --kv-cache
+cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60
 ```
 
 Run streamed generation with the cache:
 
 ```powershell
-cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --stream --kv-cache
+cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --stream
+```
+
+Disable the cache for diagnostic full-context recompute:
+
+```powershell
+cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prompt "Once upon a time" --max-new-tokens 60 --no-kv-cache --weight-runtime f32
 ```
 
 Compare cached and uncached benchmark runs:
@@ -157,7 +163,7 @@ Compare cached and uncached benchmark runs:
 cargo run --release -p miniinfer-cli -- bench-generate --model models/gpt2-miniinfer --prompt "Hey I bet you're wondering how I got into this situation" --max-new-tokens 60 --compare-cache --runs 5
 ```
 
-`--runs` defaults to `1` when omitted. Values above `1` report min/median/max timing summaries.
+Single-mode generation benchmarks default to KV-cache generation and `--weight-runtime packed-int8`. Use `--no-kv-cache --weight-runtime f32` to benchmark the older full-context FP32 path. `--runs` defaults to `1` when omitted. Values above `1` report min/median/max timing summaries.
 
 ## Benchmark Result
 

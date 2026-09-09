@@ -1,7 +1,7 @@
 use crate::{
     error::{MiniInferError, Result},
     ops::{helper, matmul, softmax},
-    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor},
+    tensor::{QuantizationScale, QuantizedTensor, Tensor, WeightTensor, PackedI8Weight},
 };
 use ndarray::ArrayView2;
 
@@ -99,6 +99,13 @@ impl OpsBackend for ReferenceBackend {
         match b {
             WeightTensor::F32(weight) => self.matmul(a, weight),
             WeightTensor::I8Symmetric(weight) => matmul_i8_symmetric_weight(a, weight),
+            WeightTensor::PackedI8Symmetric(weight) => {
+                if a.shape().len() == 2 && a.shape()[0] == 1 {
+                    matmul_packed_i8_weight(a, weight)
+                } else {
+                    self.matmul(a, &weight.dequantize()?)
+                }
+            }
         }
     }
 }
@@ -157,6 +164,13 @@ impl OpsBackend for NdArrayBackend {
         match b {
             WeightTensor::F32(weight) => self.matmul(a, weight),
             WeightTensor::I8Symmetric(weight) => self.matmul(a, &weight.dequantize()?),
+            WeightTensor::PackedI8Symmetric(weight) => {
+                if a.shape().len() == 2 && a.shape()[0] == 1 {
+                    matmul_packed_i8_weight(a, weight)
+                } else {
+                    self.matmul(a, &weight.dequantize()?)
+                }
+            }
         }
     }
 }
@@ -234,6 +248,97 @@ fn matmul_i8_symmetric_weight(
         }
     }
 
+    Tensor::new(vec![a_rows, b_cols], output)
+}
+
+fn validate_packed_i8_matmul_shape(a: &Tensor, b: &PackedI8Weight) -> Result<(usize, usize, usize)> {
+    if a.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: a.shape().len(),
+        });
+    }
+
+    if b.shape().len() != 2 {
+        return Err(MiniInferError::WrongRank {
+            expected: 2,
+            actual: b.shape().len(),
+        });
+    }
+
+    let a_rows = a.shape()[0];
+    let a_cols = a.shape()[1];
+    let b_rows = b.shape()[0];
+    let b_cols = b.shape()[1];
+
+    if a_cols != b_rows {
+        return Err(MiniInferError::InvalidTensorShape {
+            expected: vec![a_cols],
+            actual: vec![b_rows],
+        });
+    }
+
+    Ok((a_rows, a_cols, b_cols))
+}
+
+fn matmul_packed_i8_weight(a: &Tensor, b: &PackedI8Weight) -> Result<Tensor> {
+    let (a_rows, a_cols, b_cols) = validate_packed_i8_matmul_shape(a, b)?;
+    let mut output = vec![0.0; a_rows * b_cols];
+
+    match b.scale() {
+        QuantizationScale::PerTensor(scale) => {
+            for row in 0..a_rows {
+                let input_row = &a.data()[row * a_cols..(row + 1) * a_cols];
+
+                for col in 0..b_cols {
+                    let weight_col = &b.data_by_col()[col * a_cols..(col + 1) * a_cols];
+                    let mut sum = 0.0;
+
+                    for inner in 0..a_cols {
+                        sum += input_row[inner] * weight_col[inner] as f32;
+                    }
+
+                    output[row * b_cols + col] = sum * *scale;
+                }
+            }
+        }
+        QuantizationScale::PerAxis { axis: 1, scales } => {
+            for row in 0..a_rows {
+                let input_data = &a.data()[row * a_cols..(row + 1) * a_cols];
+
+                for col in 0..b_cols {
+                    let weight_col = &b.data_by_col()[col * a_cols..(col + 1) * a_cols];
+                    let mut sum = 0.0;
+
+                    for inner in 0..a_cols {
+                        sum += input_data[inner] * weight_col[inner] as f32;
+                    }
+
+                    output[row * b_cols + col] = sum * scales[col];
+                }
+            }
+        }
+        _ => {
+            for row in 0..a_rows {
+                let input_row = &a.data()[row * a_cols..(row + 1) * a_cols];
+
+                for col in 0..b_cols {
+                    let weight_col = &b.data_by_col()[col * a_cols..(col + 1) * a_cols];
+                    let mut sum = 0.0;
+
+                    for inner in 0..a_cols {
+                        let scale = match b.scale() {
+                            QuantizationScale::PerAxis { axis: 0, scales } => scales[inner],
+                            _ => unreachable!("handled above"),
+                        };
+                        sum += input_row[inner] * weight_col[inner] as f32 * scale;
+                    }
+
+                    output[row * b_cols + col] = sum;
+                }
+            }
+        }
+    }
     Tensor::new(vec![a_rows, b_cols], output)
 }
 
@@ -392,5 +497,72 @@ mod tests {
         let sum: f32 = probs.iter().sum();
 
         assert!((sum - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reference_backend_matmul_weight_packed_i8_symmetric_matches_dequantized() {
+        let backend = &ReferenceBackend::new() as &dyn OpsBackend;
+        let input = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).expect("valid input");
+        let quantized = QuantizedTensor::new(
+            vec![2, 3],
+            vec![
+                1, 2, 3,
+                4, 5, 6,
+            ],
+            QuantizationScale::PerAxis {
+                axis: 1,
+                scales: vec![0.5, 0.25, 0.125],
+            },
+        )
+        .expect("valid quantized weight");
+
+        let expected = backend
+            .matmul(&input, &quantized.dequantize().expect("dequantize should succeed"))
+            .expect("fp32 matmul should succeed");
+
+        let packed = PackedI8Weight::new(quantized).expect("packing should succeed");
+        let actual = backend
+            .matmul_weight(&input, &WeightTensor::PackedI8Symmetric(packed))
+            .expect("packed matmul should succeed");
+
+        assert_eq!(actual.shape(), expected.shape());
+
+        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+            assert_close(*actual, *expected);
+        }
+    }
+
+    #[test]
+    fn ndarray_backend_matmul_weight_packed_i8_symmetric_matches_dequantized() {
+        let backend = &NdArrayBackend::new() as &dyn OpsBackend;
+        let input = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).expect("valid input");
+        let quantized = QuantizedTensor::new(
+            vec![2, 3],
+            vec![1, 2, 3, 4, 5, 6],
+            QuantizationScale::PerAxis {
+                axis: 1,
+                scales: vec![0.5, 0.25, 0.125],
+            },
+        )
+        .expect("valid quantized weight");
+
+        let expected = backend
+            .matmul(&input, &quantized.dequantize().expect("dequantize should succeed"))
+            .expect("fp32 matmul should succeed");
+
+        let packed = PackedI8Weight::new(quantized).expect("packing should succeed");
+        let actual = backend
+            .matmul_weight(&input, &WeightTensor::PackedI8Symmetric(packed))
+            .expect("packed matmul should succeed");
+
+        assert_eq!(actual.shape(), expected.shape());
+
+        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+            assert_close(*actual, *expected);
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-5, "actual {actual} expected {expected}");
     }
 }
