@@ -1,6 +1,9 @@
-use std::{net::SocketAddr, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response, Sse}, routing::post, Json, Router};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
+use axum::response::sse::{Event, KeepAlive};
 use miniinfer_core::{
     error::{MiniInferError, Result},
     model::loader::{load_model_with_runtime, LoadedModel},
@@ -61,11 +64,42 @@ struct CompletionUsage {
 }
 
 #[derive(Serialize)]
+struct CompletionStreamChunk {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+    choices: Vec<CompletionStreamChoice>,
+}
+
+#[derive(Serialize)]
+struct CompletionStreamChoice {
+    text: String,
+    index: usize,
+    finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error: String,
 }
 
-type HttpResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
+type HttpError = (StatusCode, Json<ErrorResponse>);
+type HttpResult<T> = std::result::Result<T, HttpError>;
+
+enum CompletionOutput {
+    Json(Json<CompletionResponse>),
+    Sse(Response),
+}
+
+impl IntoResponse for CompletionOutput {
+    fn into_response(self) -> Response {
+        match self {
+            CompletionOutput::Json(json) => json.into_response(),
+            CompletionOutput::Sse(response) => response,
+        }
+    }
+}
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let use_kv_cache = !args.no_kv_cache;
@@ -101,8 +135,146 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
 async fn create_completion(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<CompletionRequest>,
-) -> HttpResult<CompletionResponse> {
-    run_completion(&state, request).map(Json).map_err(server_error)
+) -> HttpResult<CompletionOutput> {
+    if request.stream.unwrap_or(false) {
+        create_completion_stream(state, request)
+    } else {
+        run_completion(&state, request)
+            .map(|response| CompletionOutput::Json(Json(response)))
+            .map_err(server_error)
+    }
+}
+
+fn create_completion_stream(
+    state: Arc<ServerState>,
+    request: CompletionRequest,
+) -> HttpResult<CompletionOutput> {
+    validate_completion_request(&request).map_err(server_error)?;
+
+    let (sender, receiver) = mpsc::channel::<std::result::Result<Event, Infallible>>(16);
+
+    tokio::task::spawn_blocking(move || {
+        let result = run_completion_streaming(state, request, sender.clone());
+
+        if let Err(err) = result {
+            let _ = sender.blocking_send(Ok(
+                Event::default().event("error").data(format!("{err:?}")),
+            ));
+        }
+        let _ = sender.blocking_send(Ok(Event::default().data("[DONE]")));
+    });
+
+    let stream = ReceiverStream::new(receiver);
+    let sse = Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    );
+
+    Ok(CompletionOutput::Sse(
+        sse.into_response()
+    ))
+}
+
+fn run_completion_streaming(
+    state: Arc<ServerState>,
+    request: CompletionRequest,
+    sender: mpsc::Sender<std::result::Result<Event, Infallible>>,
+) -> Result<()> {
+    let max_tokens = request.max_tokens.unwrap_or(1);
+    let prompt_tokens = state.model.encode_prompt(&request.prompt)?;
+    let options = GenerationOptions::new(
+        max_tokens,
+        request.temperature,
+        request.seed,
+        request.top_k,
+        request.top_p,
+    )?;
+
+    let (created, created_nanos) = current_unix_time_parts();
+
+    let id = format!("cmpl-{created}-{created_nanos}");
+    let response_model = request.model.unwrap_or_else(|| state.model_name.clone());
+    let mut saw_prompt = false;
+
+    with_backend(state.backend, |backend| {
+        if state.use_kv_cache {
+            options.generate_streaming_with_kv_cache_and_backend(
+                &state.model,
+                &prompt_tokens,
+                backend,
+                |chunk| {
+                    if !saw_prompt {
+                        saw_prompt = true;
+                        return;
+                    }
+                    send_completion_chunk(
+                        &sender,
+                        &id,
+                        created,
+                        &response_model,
+                        chunk,
+                        None,
+                    );
+                },
+            )
+        } else {
+            options.generate_streaming_with_backend(
+                &state.model,
+                &prompt_tokens,
+                backend,
+                |chunk| {
+                    if !saw_prompt {
+                        saw_prompt = true;
+                        return;
+                    }
+                    send_completion_chunk(
+                        &sender,
+                        &id,
+                        created,
+                        &response_model,
+                        chunk,
+                        None,
+                    );
+                },
+            )
+        }
+    })?;
+
+    send_completion_chunk(
+        &sender,
+        &id,
+        created,
+        &response_model,
+        "",
+        Some("length"),
+    );
+    Ok(())
+}
+
+fn send_completion_chunk(
+    sender: &mpsc::Sender<std::result::Result<Event, Infallible>>,
+    id: &str,
+    created: u64,
+    model: &str,
+    text: &str,
+    finish_reason: Option<&str>,
+) {
+    let chunk = CompletionStreamChunk {
+        id: id.to_string(),
+        object: "text_completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![CompletionStreamChoice {
+            text: text.to_string(),
+            index: 0,
+            finish_reason: finish_reason.map(|s| s.to_string()),
+        }],
+    };
+
+    if let Ok(data) = serde_json::to_string(&chunk) {
+        let _ = sender.blocking_send(Ok(Event::default().data(data)));
+    }
 }
 
 fn run_completion(state: &ServerState, request: CompletionRequest) -> Result<CompletionResponse> {
