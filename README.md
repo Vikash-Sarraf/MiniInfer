@@ -120,6 +120,32 @@ cargo run --release -p miniinfer-cli -- run --model models/gpt2-miniinfer --prom
 
 GPT-2 is not instruction-tuned. Generated text can be repetitive, inconsistent, or factually wrong; the important runtime signal is that MiniInfer runs a real decoder-only model path end to end.
 
+## HTTP Server
+
+MiniInfer can keep a model loaded in a local Rust HTTP server and expose an OpenAI-style completions endpoint:
+
+```powershell
+cargo run --release -p miniinfer-cli -- serve --model models/gpt2-miniinfer-int8-channel --port 8080
+```
+
+Non-streaming completion request:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/completions `
+  -ContentType "application/json" `
+  -Body '{"prompt":"Once upon a time","max_tokens":20,"temperature":0.8,"top_k":40,"top_p":0.9,"seed":42}'
+```
+
+Streaming completion request using Server-Sent Events:
+
+```powershell
+curl.exe -N -X POST http://127.0.0.1:8080/v1/completions `
+  -H "Content-Type: application/json" `
+  -d '{"prompt":"Hello world","max_tokens":6,"temperature":0.9,"top_k":40,"top_p":0.9,"seed":42,"stream":true}'
+```
+
+See [docs/server.md](docs/server.md) for request fields, response shape, streaming format, and current limitations.
+
 ## Benchmarks
 
 Compare no-cache and KV-cache generation:
@@ -159,6 +185,7 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 - [docs/kv-cache.md](docs/kv-cache.md) explains the current KV-cache layout, decode flow, benchmark result, and limitations.
 - [docs/benchmarks.md](docs/benchmarks.md) records reproducible benchmark commands and current local results.
 - [docs/quantization.md](docs/quantization.md) explains the current int8 artifact format, packed runtime path, and measured drift.
+- [docs/server.md](docs/server.md) documents the local HTTP completions server and SSE streaming endpoint.
 - [.github/docs/plan.md](.github/docs/plan.md) tracks the larger V1/V1.5 roadmap.
 
 ## Current Limitations
@@ -166,6 +193,7 @@ See [docs/benchmarks.md](docs/benchmarks.md) for commands, environment details, 
 - GPT-2 is the only implemented model architecture.
 - CPU is the only runtime target.
 - Packed-int8 is currently optimized for cached one-token decode; no-cache and multi-row paths still favor FP32 ndarray matmul.
+- The HTTP server supports `/v1/completions`; chat completions, tool calls, auth, and prefix cache are future work.
 - Benchmark results are local measurements and can be summarized across repeated runs with `--runs`.
 - The runtime is an inference engine, not a production server.
 
